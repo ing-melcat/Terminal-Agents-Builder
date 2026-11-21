@@ -6,7 +6,7 @@ set -eu
 
 PREFIX="/data/data/com.termux/files/usr"
 HOME_DIR="/data/data/com.termux/files/home"
-STAMP_FILE="$HOME_DIR/.config/melcat/.bootstrap_provisioned_v1"
+STAMP_FILE="$HOME_DIR/.config/melcat/.bootstrap_provisioned_v2"
 
 export PATH="$PREFIX/bin:$PATH"
 export HOME="$HOME_DIR"
@@ -77,7 +77,82 @@ df -h "$PREFIX" | tail -n 1 | awk '{print "[melcat-gc] Free storage: " $4 " (" $
 EOF
 chmod 0700 "$PREFIX/bin/melcat-gc"
 
-# 4. Configure shell profile for Antigravity (agy) & Claude CLI OAuth token inheritance
+# 4. Install `agy` native CLI launcher & workstation controller
+cat > "$PREFIX/bin/agy" <<'EOF'
+#!/data/data/com.termux/files/usr/bin/sh
+set -eu
+PREFIX="/data/data/com.termux/files/usr"
+HOME_DIR="/data/data/com.termux/files/home"
+TOKEN_FILE="$HOME_DIR/.config/antigravity/antigravity-oauth-token"
+SKILLS_DIR="$HOME_DIR/.gemini/config/skills"
+
+if [ -f "$TOKEN_FILE" ]; then
+    chmod 600 "$TOKEN_FILE" 2>/dev/null || true
+    export ANTIGRAVITY_OAUTH_TOKEN="$(cat "$TOKEN_FILE")"
+fi
+
+case "${1:-}" in
+    --ui|ui|workstation)
+        echo "[agy] Opening 120Hz Agents Workstation UI..."
+        am start -n com.termux/com.termux.custom.ui.WorkstationActivity >/dev/null 2>&1 || \
+        am start -n com.termux/.custom.ui.WorkstationActivity
+        exit 0
+        ;;
+    --setup|setup)
+        echo "[agy] Installing native arm64-v8a workstation toolchain (git, nodejs-lts, zstd, zsh, tmux, ripgrep, jq)..."
+        pkg update -y && pkg install -y git nodejs-lts zstd zsh tmux ripgrep jq
+        echo "[agy] Toolchain ready."
+        exit 0
+        ;;
+    --skills|skills)
+        echo "[agy] Active skills in $SKILLS_DIR (symlinked to ~/.claude/skills):"
+        ls -1 "$SKILLS_DIR" 2>/dev/null || true
+        exit 0
+        ;;
+    --token|token)
+        if [ -f "$TOKEN_FILE" ]; then
+            MODE="$(stat -c '%a' "$TOKEN_FILE" 2>/dev/null || echo '600')"
+            echo "[agy] OAuth token PRESENT at $TOKEN_FILE (mode: 0$MODE)"
+        else
+            echo "[agy] OAuth token NOT provisioned yet. Run 'agy ui' -> Guardian & Token -> Provision."
+        fi
+        exit 0
+        ;;
+esac
+
+if [ -x "$HOME_DIR/.local/bin/agy" ]; then
+    exec "$HOME_DIR/.local/bin/agy" "$@"
+fi
+
+echo "============================================================"
+echo " Antigravity CLI (agy) — Native arm64-v8a Workstation"
+echo "============================================================"
+echo " Prefix     : $PREFIX (targetSdk=28 W^X exec enabled)"
+echo " Skills Dir : $SKILLS_DIR ($(ls -1 "$SKILLS_DIR" 2>/dev/null | tr '\n' ' '))"
+if [ -f "$TOKEN_FILE" ]; then
+    echo " OAuth Token: ACTIVE (0600 inherited)"
+else
+    echo " OAuth Token: NOT SET (provision via 'agy ui')"
+fi
+echo "------------------------------------------------------------"
+echo " Commands:"
+echo "   agy ui        -> Open 120Hz Compose Workstation UI"
+echo "   agy setup     -> Install native git, nodejs-lts, zstd, zsh, tmux, rg"
+echo "   agy skills    -> List unified ~/.gemini & ~/.claude skills"
+echo "   agy token     -> Verify OAuth token 0600 status"
+echo "   melcat-gc     -> Clean caches & zstd-compress logs"
+echo "============================================================"
+EOF
+chmod 0700 "$PREFIX/bin/agy"
+
+# 5. Install `workstation` shortcut command
+cat > "$PREFIX/bin/workstation" <<'EOF'
+#!/data/data/com.termux/files/usr/bin/sh
+exec agy ui
+EOF
+chmod 0700 "$PREFIX/bin/workstation"
+
+# 6. Configure shell profile for Antigravity (agy) & Claude CLI OAuth token inheritance
 PROFILE_RC="$HOME_DIR/.bashrc"
 MARKER="# >>> TERMINAL-AGENTS-BUILDER >>>"
 if [ ! -f "$PROFILE_RC" ] || ! grep -q "$MARKER" "$PROFILE_RC"; then

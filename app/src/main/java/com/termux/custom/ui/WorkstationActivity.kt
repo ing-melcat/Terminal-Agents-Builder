@@ -255,12 +255,27 @@ private fun WorkstationRoot(
         ProcessGuardianService.refreshSnapshot(context)
     }
 
-    // Bind active PTY session from TermuxService when available
+    // Bind active PTY session from TermuxService when available (or create one if none exists yet)
     DisposableEffect(termuxService, activeSessionIndex) {
-        val termuxSessions = termuxService?.termuxSessions
-        if (!termuxSessions.isNullOrEmpty()) {
-            val safeIndex = activeSessionIndex.coerceIn(0, termuxSessions.lastIndex)
-            surfaceBridge.attachSession(termuxSessions[safeIndex].terminalSession)
+        val service = termuxService
+        if (service != null) {
+            if (service.termuxSessions.isEmpty() && File(TermuxConstants.TERMUX_PREFIX_DIR_PATH).exists()) {
+                runCatching {
+                    service.createTermuxSession(
+                        null,
+                        null,
+                        null,
+                        TermuxConstants.TERMUX_HOME_DIR_PATH,
+                        false,
+                        "agy-main",
+                    )
+                }
+            }
+            val termuxSessions = service.termuxSessions
+            if (!termuxSessions.isNullOrEmpty()) {
+                val safeIndex = activeSessionIndex.coerceIn(0, termuxSessions.lastIndex)
+                surfaceBridge.attachSession(termuxSessions[safeIndex].terminalSession)
+            }
         }
         onDispose { }
     }

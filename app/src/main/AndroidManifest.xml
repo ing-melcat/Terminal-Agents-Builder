@@ -51,6 +51,21 @@
         tools:targetApi="m">
 
         <activity
+            android:name=".custom.ui.WorkstationActivity"
+            android:configChanges="orientation|screenSize|smallestScreenSize|density|screenLayout|keyboard|keyboardHidden|navigation"
+            android:exported="true"
+            android:label="Agents Workstation"
+            android:launchMode="singleTask"
+            android:resizeableActivity="true"
+            android:theme="@style/Theme.TermuxActivity.DayNight.NoActionBar"
+            tools:targetApi="n">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
             android:name=".app.TermuxActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|smallestScreenSize|density|screenLayout|keyboard|keyboardHidden|navigation"
@@ -193,21 +208,6 @@
             android:name=".shared.activities.ReportActivity$ReportActivityBroadcastReceiver"
             android:exported="false" />
 
-
-        <activity
-            android:name=".custom.ui.WorkstationActivity"
-            android:configChanges="orientation|screenSize|smallestScreenSize|density|screenLayout|keyboard|keyboardHidden|navigation"
-            android:exported="true"
-            android:label="Agents Workstation"
-            android:launchMode="singleTask"
-            android:resizeableActivity="true"
-            android:theme="@style/Theme.TermuxActivity.DayNight.NoActionBar"
-            tools:targetApi="n">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
 
         <service
             android:name=".custom.guardian.ProcessGuardianService"
