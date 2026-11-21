@@ -1,91 +1,74 @@
-# SPEC.md — Arquitectura y Plan de Ejecución: App Android Local-First
+# SPEC.md — Terminal Agents Builder (`com.termux` + `com.termux.custom.*`)
 
-## 1. Visión del Producto y Paradigma
-Aplicación móvil nativa para **Android** construida bajo el paradigma **Local-First (Offline-First)**.
-* **Principio fundamental:** La base de datos local en el dispositivo es la única fuente de verdad (*Single Source of Truth*) para la interfaz de usuario. Todas las operaciones de lectura y escritura ocurren de forma instantánea en local con latencia cero, sin depender de conexión a internet.
-* **Resiliencia:** Cero pantallas de carga bloqueantes por red, persistencia atómica garantizada ante cierres inesperados y preparación estructural para sincronización diferencial opcional en segundo plano (CRDTs / Timestamps + Soft Deletes).
+## 1. Definición del Proyecto
+Aplicación Android (APK) personalizada sobre el núcleo open-source de **`termux-app` (GPLv3)**, estructurada como una capa de personalización limpia (al estilo de **HyperOS sobre AOSP**) orientada a funcionar como **estación de trabajo nativa para agentes IA (`Antigravity CLI / agy` y `Claude CLI`)**.
 
----
-
-## 2. Stack Tecnológico Obligatorio
-* **Lenguaje:** Kotlin 2.0+ (Coroutines + `StateFlow` / `SharedFlow`).
-* **UI Framework:** Jetpack Compose (Material 3) con soporte nativo para Edge-to-Edge y gestos fluidos.
-* **Base de Datos Local:** Room (SQLite) con modo WAL (*Write-Ahead Logging*) activado y migraciones versionadas explícitas.
-* **Inyección de Dependencias:** Hilt (Dagger) o Koin (preferencia: Hilt para validación en tiempo de compilación).
-* **Arquitectura:** Clean Architecture + MVI / MVVM unidireccional (`UI -> Intent/Event -> ViewModel -> UseCase -> Repository -> Room DAO -> Flow<UiState>`).
-* **Procesamiento en Segundo Plano:** WorkManager para tareas diferidas y sincronización resiliente.
-* **Target SDK:** Min SDK 26 (Android 8.0) / Target SDK 35 (Android 15).
+* **Ejecución Nativa `arm64-v8a`:** Sin contenedores pesados como `proot-distro`. Ejecución directa sobre binarios `aarch64` en `$PREFIX` (`/data/data/com.termux/files/usr`).
+* **Dispositivos Objetivo:**
+  * **Primario (Modo Tablet / Desktop 120Hz):** Xiaomi Pad 6 con teclado físico bajo HyperOS.
+  * **Secundario (Modo Compacto / Móvil):** Redmi Note 13 Pro y cualquier dispositivo Android `arm64-v8a` con el mismo binario APK.
 
 ---
 
-## 3. Reglas de Ejecución para el Agente (`agy`)
+## 2. Reglas Inmutables e Invariantes Técnicos
 
-### Uso de Skills Activas (`~/.gemini/config/skills`)
-1. **`senior-auditor`:** Antes de dar por cerrado cualquier módulo, esquema de Room o repositorio, audita condiciones de carrera en hilos (`Dispatchers.IO`), fugas de memoria, manejo de excepciones y consultas SQL sin índices. Cero código placeholder (`// TODO`).
-2. **`motion-framer`:** Toda transición de pantalla, apertura de tarjetas, estado vacío (*empty state*) y micro-interacción en Jetpack Compose debe implementar físicas de resorte (`spring()`), curvas de aceleración naturales y transiciones compartidas fluidas (`AnimatedContent`, `animateItemPlacement`), evitando saltos bruscos de layout.
-3. **`caveman`:** Mantén las respuestas de terminal, logs de avance y explicaciones técnicas ultra-concisas, directas y sin relleno verbal. Prioriza código funcional y comandos ejecutables.
+1. **`targetSdkVersion = 28` fijo:** Prohibido elevar a `29+` para evitar el bloqueo SELinux `W^X` de Android 10+ sobre ejecución de binarios desde el directorio de datos de la app (`execve` en `$PREFIX/bin`).
+2. **`applicationId = "com.termux"` y `$PREFIX = /data/data/com.termux/files/usr`:** Se conservan intactos para compatibilidad binaria 100% con los repositorios `apt-android-7` (`aarch64`) de Termux.
+3. **Motor PTY Intocable:** Prohibido modificar `forkpty`, descriptores de archivo (`FD`) o manejo de señales POSIX en `terminal-emulator/src/main/jni/termux.c`.
+4. **Bootstrap Atómico:** Respetar íntegramente la extracción de `bootstrap-aarch64.zip`, `SYMLINKS.txt` y el `renameTo` atómico en `TermuxInstaller.java`. Cualquier auto-provisioning (`bootstrap-custom.sh`) se ejecuta **después** del `renameTo` atómico.
+5. **Aislamiento de Código Nuevo:** Todo el desarrollo nuevo reside bajo `com.termux.custom.*`, manteniendo los paquetes upstream (`com.termux.app`, `com.termux.terminal`, `com.termux.view`, `com.termux.shared`) limpios para merges desde upstream.
+6. **Licencia y Verificación:** Cumplimiento estricto de **GPLv3** de `termux-app` y verificación real de compilación NDK/JNI + Kotlin/Java.
 
 ---
 
-## 4. Estructura de Capas del Proyecto
+## 3. Arquitectura en 4 Capas
 
 ```text
-app/src/main/java/com/melcat/localfirst/
-├── core/
-│   ├── database/          # AppDatabase, TypeConverters, WAL config, Migrations
-│   ├── di/                # Módulos de Hilt (DatabaseModule, RepositoryModule)
-│   ├── designsystem/      # Tema Material 3, Tipografía, Tokens de Motion (motion-framer)
-│   └── common/            # Result wrapper, DispatchersProvider, Extensiones
-├── feature/
-│   └── [nombre_modulo]/
-│       ├── data/          # Entities, DAOs, Mappers, RepositoryImpl
-│       ├── domain/        # Models puros, Repository Interface, UseCases
-│       └── presentation/  # Screen (Compose), ViewModel, UiState, UiEvent, Components
-└── MainActivity.kt        # Configuración Edge-to-Edge y NavHost
+Terminal-Agents-Builder/
+├── terminal-emulator/                  # [Capa 0 - Inmutable] Motor PTY C/JNI (termux.c)
+├── terminal-view/                      # [Capa 0 - Inmutable] Renderizador base de terminal
+├── termux-shared/                      # [Capa 0 - Inmutable] Utilidades, shell env y constantes
+└── app/
+    └── src/main/
+        ├── cpp/                        # JNI loader de bootstrap-aarch64.zip
+        ├── assets/custom/
+        │   └── bootstrap-custom.sh     # Script idempotente post-bootstrap (agy/claude/skills/zstd)
+        └── java/com/termux/
+            ├── app/                    # Upstream TermuxActivity, TermuxService, TermuxInstaller
+            └── custom/                 # === CAPAS 1, 2 Y 3 (AISLADAS) ===
+                ├── data/               # [Capa 1] SQLite Local-First + CRDT Delta Log (conversaciones, contextos, compactaciones)
+                ├── security/           # [Capa 1] AntigravityTokenWarden (antigravity-oauth-token chmod 0600)
+                ├── guardian/           # [Capa 1] ProcessGuardianService (WakeLock, WifiLock, HyperOS Autostart, Phantom Killer)
+                ├── storage/            # [Capa 1] StorageOptimizer (zstd -T0, tar --zstd snapshots, melcat-gc)
+                ├── provisioning/       # [Capa 1] CustomBootstrapProvisioner (post-atomic-rename hook -> bootstrap-custom.sh)
+                ├── bridge/             # [Capa 2] TerminalSurfaceBridge (120Hz frame pacing, NerdFont, hardware keyboard chords)
+                └── ui/                 # [Capa 3] WorkstationActivity (Compose WindowSizeClass: Tablet 120Hz vs Compact Phone)
 ```
 
----
+### Capa 0 — Núcleo Upstream de Termux (Inmutable)
+* Motor PTY nativo en C/JNI (`terminal-emulator/src/main/jni/termux.c`).
+* `TermuxService` y extracción atómica de `bootstrap-aarch64` en `TermuxInstaller.java`.
 
-## 5. Modelo de Datos Base (Local-First Ready)
+### Capa 1 — Runtime, Datos Local-First y Optimización (`com.termux.custom.*`)
+* **Persistencia Local-First Descentralizada (`com.termux.custom.data`):** Base de datos SQLite en modo WAL con registro de deltas CRDT (Lamport clock + `site_id` + `hlc_timestamp` + soft-delete tombstones) para almacenar sesiones de agentes, contextos, compactaciones y exportar/importar deltas P2P sin servidor central.
+* **Herencia Segura de Tokens (`com.termux.custom.security.AntigravityTokenWarden`):** Gestión y sincronización del token `antigravity-oauth-token` con permisos POSIX `0600` (`Os.chmod`) en almacenamiento privado y puente hacia `~/.config/antigravity/` / `~/.gemini/` para reutilizar la identidad y cuota del CLI sin sesiones paralelas conflictivas.
+* **Supervivencia de Procesos (`com.termux.custom.guardian.ProcessGuardianService`):**
+  * `ForegroundService` persistente con `PARTIAL_WAKE_LOCK` y `WIFI_MODE_FULL_HIGH_PERF`.
+  * Intents directos a **HyperOS / MIUI Autostart** (`miui.intent.action.OP_AUTO_START`) y exclusión de ahorro de batería.
+  * Diagnóstico del **Phantom Process Killer** de Android 12+ (`max_phantom_processes`) con generador de comando ADB/Wireless Debugging listo para copiar.
+* **Optimización de Almacenamiento (`com.termux.custom.storage.StorageOptimizer`):**
+  * Compresión `zstd` (`tar --zstd` / `zstd -T0`) para rotación de logs y snapshots portables entre Xiaomi Pad 6 y Redmi Note 13 Pro.
+  * Rutina `melcat-gc` para limpieza segura de cachés (`apt`, `npm/pnpm`, `pip`, logs huérfanos).
+* **Auto-Provisioning (`com.termux.custom.provisioning.CustomBootstrapProvisioner` + `bootstrap-custom.sh`):**
+  * Ejecutado de forma idempotente tras el `renameTo` atómico de `$STAGING_PREFIX -> $PREFIX`.
+  * Configura `~/.gemini/config/skills/`, crea el enlace simbólico hacia `~/.claude/skills/`, instala el binario helper `melcat-gc` en `$PREFIX/bin/melcat-gc` y prepara el perfil para `zsh` + `zellij`/`tmux`.
 
-Toda entidad persistente en Room debe incluir metadatos base para integridad y futura sincronización sin reescribir el esquema:
+### Capa 2 — Abstracción de Terminal Moderna (`com.termux.custom.bridge.TerminalSurfaceBridge`)
+* Interfaz que desacopla el `TerminalSession` / descriptor PTY de Termux del renderizador visual.
+* **Fase 1 (Implementada):** Envoltura acelerada por hardware de `TerminalView` con configuración a **120Hz** (`FrameRate` / high-refresh display mode para Xiaomi Pad 6), soporte de fuente monoespaciada/Nerd Font, atajos completos de teclado físico (`Ctrl+Shift+P` Command Palette, `Ctrl+T` nueva sesión, `Ctrl+Tab` cambio de pestaña, `Alt+1..9`) y lanzamiento directo de agentes (`agy`, `claude`, `zellij`, `melcat-gc`).
+* **Fase 2 (Preparada):** Punto de extensión `RendererBackend` para conectar un motor GPU nativo (`alacritty_terminal` / `libghostty-vt`) al mismo descriptor PTY.
 
-```kotlin
-// Campos estándar obligatorios en cada @Entity:
-// @PrimaryKey val id: String = UUID.randomUUID().toString()
-// val createdAt: Long = System.currentTimeMillis()
-// val updatedAt: Long = System.currentTimeMillis()
-// val isDeleted: Boolean = false                  // Soft-delete para integridad local/sync
-// val syncStatus: SyncStatus = SyncStatus.PENDING // LOCAL_ONLY, PENDING, SYNCED
-```
-
----
-
-## 6. Fases de Construcción (Secuencia Estricta)
-
-### Fase 1: Scaffolding y Configuración Gradle (Version Catalog `libs.versions.toml`)
-* Inicializar proyecto Android con Kotlin DSL (`build.gradle.kts`).
-* Configurar KSP (Kotlin Symbol Processing) para Room y Hilt.
-* Verificar compilación limpia `./gradlew assembleDebug` antes de escribir lógica de negocio.
-
-### Fase 2: Capa de Datos Local (Room + Repository)
-* Implementar `AppDatabase` con `setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)`.
-* Crear entidades, DAOs reactivos retornando `Flow<List<Entity>>` y pruebas unitarias instrumentadas/Robolectric para operaciones CRUD y soft-deletes.
-
-### Fase 3: Capa de Dominio y Estado Unidireccional
-* Definir modelos inmutables (`@Immutable` / `@Stable` para optimizar recomposiciones en Compose).
-* Implementar `ViewModel` exponiendo `StateFlow<UiState>` mediante `stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), InitialState)`.
-
-### Fase 4: Interfaz Jetpack Compose + Físicas de Movimiento
-* Construir pantallas principales con componentes modulares y soporte completo para modo oscuro/claro dinámico.
-* Aplicar `motion-framer` en listas, gestos de deslizar para eliminar/archivar y retroalimentación háptica (`HapticFeedbackType`).
-
-### Fase 5: Auditoría Final y Empaquetado APK
-* Ejecutar auditoría completa con `senior-auditor` (revisión de recomposiciones innecesarias, índices SQLite y manejo de permisos).
-* Compilar APK de prueba: `./gradlew assembleDebug` y validar instalación vía `adb install -r app/build/outputs/apk/debug/app-debug.apk`.
-
----
-
-## 7. Prompt de Arranque para `agy`
-
-> "Lee `SPEC.md` completo. Activa las skills `senior-auditor`, `motion-framer` y `caveman`. Inicia la Fase 1 generando la estructura base del proyecto, `libs.versions.toml` y `build.gradle.kts` listos para compilar."
+### Capa 3 — Interfaz Adaptativa (`com.termux.custom.ui`)
+* Construida en **Kotlin + Jetpack Compose** con detección reactiva de `WindowSizeClass` y teclado físico (`Configuration.keyboard == KEYBOARD_QWERTY`):
+  * **Modo Tablet / Desktop (Xiaomi Pad 6 + Teclado Físico):** Barra superior de pestañas multi-sesión, panel lateral de agentes/contextos CRDT + diagnósticos HyperOS/Token/Storage, paleta de comandos rápida y barra de estado inferior en tiempo real.
+  * **Modo Compacto (Redmi Note 13 Pro / Celular):** Navegación inferior compacta, barra táctil rápida de modificadores (`ESC`, `CTRL`, `ALT`, `TAB`, `/`, `-`, flechas y lanzadores `agy`/`claude`) y acceso rápido a snapshots/guardian.
