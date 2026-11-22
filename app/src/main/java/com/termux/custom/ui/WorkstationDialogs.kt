@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -37,6 +38,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -82,27 +84,38 @@ internal fun SearchableCommandPaletteDialog(
     onOpenTutorial: () -> Unit,
 ) {
     var query by rememberSaveable { mutableStateOf("") }
+    val latestExec by rememberUpdatedState(onExecuteShellCommand)
+    val latestNewPty by rememberUpdatedState(onNewPtySession)
+    val latestToggleZen by rememberUpdatedState(onToggleZen)
+    val latestOpenToken by rememberUpdatedState(onOpenTokenVault)
+    val latestOpenCoding by rememberUpdatedState(onOpenCodingModelsVault)
+    val latestOpenSsh by rememberUpdatedState(onOpenSshPanel)
+    val latestCheckUpdate by rememberUpdatedState(onCheckAppUpdate)
+    val latestOpenTutorial by rememberUpdatedState(onOpenTutorial)
 
     val actions = remember(isZenMode) {
         listOf(
-            PaletteAction("agy", "Launch official Google Antigravity CLI (native arm64)", "", "antigravity cli agent", { onExecuteShellCommand("agy") }),
-            PaletteAction("opencode", "Launch native Bionic OpenCode v2 coding agent", "", "opencode code coder qwen devstral", { onExecuteShellCommand("opencode") }),
-            PaletteAction("Dispositivos SSH & Tailscale", "Connect to online LAN & Tailscale devices with 1 tap", "", "ssh tailscale lan remote jetson pi devices", onOpenSshPanel),
-            PaletteAction("Coding Models & Vault (0600)", "Select code-only models (Free / Eco / Pro / Ollama) & API keys", "", "models openrouter mistral ollama qwen coder codestral codex", onOpenCodingModelsVault),
-            PaletteAction("workstation install-ssh", "Install native Termux OpenSSH client (ssh, ssh-keygen)", "", "ssh openssh install tailscale keygen", { onExecuteShellCommand("workstation install-ssh") }),
-            PaletteAction("workstation install-opencode", "Install native Bionic OpenCode v2 via signed APT repo", "", "install opencode bionic apt", { onExecuteShellCommand("workstation install-opencode") }),
-            PaletteAction("workstation setup", "Install native Antigravity CLI (agy) + glibc + toolchain", "", "setup install agy glibc", { onExecuteShellCommand("workstation setup") }),
-            PaletteAction("Workstation Doctor", "Verify agy, opencode, openssh, glibc, TLS, DNS & 0600 vaults", "", "doctor diagnose toolchain agy opencode ssh", { onExecuteShellCommand("workstation doctor") }),
-            PaletteAction("agy update", "Self-update native Antigravity CLI binary", "", "update upgrade agy", { onExecuteShellCommand("agy update") }),
-            PaletteAction("zellij", "Start Zellij terminal multiplexer", "", "", { onExecuteShellCommand("zellij") }),
-            PaletteAction("New Terminal Session", "Spawn an isolated native PTY shell tab", "^⇧T", "", onNewPtySession),
-            PaletteAction(if (isZenMode) "Exit Zen Mode" else "Enter Zen Mode", "Expand terminal canvas across full display", "^⇧B", "", onToggleZen),
-            PaletteAction("Clean Caches (melcat-gc)", "Purge apt/pip/npm caches and zstd-compress old logs", "", "", { onExecuteShellCommand("melcat-gc") }),
-            PaletteAction("Portable Snapshot", "Create secret-free tar.zst workspace archive", "", "", { onExecuteShellCommand("melcat-gc --snapshot") }),
-            PaletteAction("Antigravity OAuth Vault", "Provision or rotate 0600 Antigravity OAuth token", "", "oauth token vault", onOpenTokenVault),
-            PaletteAction("Check for App Update (OTA)", "Query GitHub Releases and verify SHA-256", "", "", onCheckAppUpdate),
-            PaletteAction("Interactive Tutorial & First Steps", "Guided workstation onboarding & setup checklist", "", "tutorial help primeros pasos guide", onOpenTutorial),
-            PaletteAction("claude (optional)", "Launch Claude CLI if installed with Anthropic account", "", "claude anthropic", { onExecuteShellCommand("claude") }),
+            PaletteAction("agy", "Launch official Google Antigravity CLI (native arm64)", "", "antigravity cli agent", { latestExec("agy") }),
+            PaletteAction("opencode", "Launch native Bionic OpenCode v2 coding agent", "", "opencode code coder qwen devstral", { latestExec("opencode") }),
+            PaletteAction("Dispositivos SSH & Tailscale", "Connect to online LAN & Tailscale devices with 1 tap", "", "ssh tailscale lan remote jetson pi devices", { latestOpenSsh() }),
+            PaletteAction("Coding Models & Vault (0600)", "Select code-only models (Free / Eco / Pro / Ollama) & API keys", "", "models openrouter mistral ollama qwen coder codestral codex", { latestOpenCoding() }),
+            PaletteAction("workstation install-ssh", "Install native Termux OpenSSH client (ssh, ssh-keygen)", "", "ssh openssh install tailscale keygen", { latestExec("workstation install-ssh") }),
+            PaletteAction("workstation skills update", "Pull latest skills repos safely (rebase + autostash, keeps AI edits)", "", "skills git pull update sync repo", { latestExec("workstation skills update") }),
+            PaletteAction("workstation skills diff", "Inspect local skill improvements made by agy / opencode / claude", "", "skills diff changes git status", { latestExec("workstation skills diff") }),
+            PaletteAction("workstation skills push", "Commit & push improved skills to your remote Git repository", "", "skills push sync github backup", { latestExec("workstation skills push") }),
+            PaletteAction("workstation install-opencode", "Install native Bionic OpenCode v2 via signed APT repo", "", "install opencode bionic apt", { latestExec("workstation install-opencode") }),
+            PaletteAction("workstation setup", "Install native Antigravity CLI (agy) + glibc + toolchain", "", "setup install agy glibc", { latestExec("workstation setup") }),
+            PaletteAction("Workstation Doctor", "Verify agy, opencode, openssh, glibc, TLS, DNS & 0600 vaults", "", "doctor diagnose toolchain agy opencode ssh", { latestExec("workstation doctor") }),
+            PaletteAction("agy update", "Self-update native Antigravity CLI binary", "", "update upgrade agy", { latestExec("agy update") }),
+            PaletteAction("zellij", "Start Zellij terminal multiplexer", "", "", { latestExec("zellij") }),
+            PaletteAction("New Terminal Session", "Spawn an isolated native PTY shell tab", "^⇧T", "", { latestNewPty() }),
+            PaletteAction(if (isZenMode) "Exit Zen Mode" else "Enter Zen Mode", "Expand terminal canvas across full display", "^⇧B", "", { latestToggleZen() }),
+            PaletteAction("Clean Caches (melcat-gc)", "Purge apt/pip/npm caches and zstd-compress old logs", "", "", { latestExec("melcat-gc") }),
+            PaletteAction("Portable Snapshot", "Create secret-free tar.zst workspace archive", "", "", { latestExec("melcat-gc --snapshot") }),
+            PaletteAction("Antigravity OAuth Vault", "Provision or rotate 0600 Antigravity OAuth token", "", "oauth token vault", { latestOpenToken() }),
+            PaletteAction("Check for App Update (OTA)", "Query GitHub Releases and verify SHA-256", "", "", { latestCheckUpdate() }),
+            PaletteAction("Interactive Tutorial & First Steps", "Guided workstation onboarding & setup checklist", "", "tutorial help primeros pasos guide", { latestOpenTutorial() }),
+            PaletteAction("claude (optional)", "Launch Claude CLI if installed with Anthropic account", "", "claude anthropic", { latestExec("claude") }),
         )
     }
 
@@ -903,4 +916,156 @@ internal fun CodingModelsVaultDialog(
             }
         }
     }
+}
+
+@Composable
+internal fun AddSkillRepoDialog(
+    isRootGitRepo: Boolean,
+    onDismiss: () -> Unit,
+    onCloneSubRepo: (gitUrl: String, folderName: String) -> Unit,
+    onConnectRootRepo: (gitUrl: String) -> Unit,
+) {
+    var mode by rememberSaveable { mutableStateOf("add") } // "add" or "init"
+    var gitUrl by rememberSaveable { mutableStateOf("") }
+    var folderName by rememberSaveable { mutableStateOf("") }
+    var errorText by rememberSaveable { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = WorkstationColors.SurfaceElevated,
+        title = {
+            Text(
+                text = "Repositorios de Skills (Git)",
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = WorkstationColors.TextPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(9.dp),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    FilterChip(
+                        selected = mode == "add",
+                        onClick = {
+                            mode = "add"
+                            errorText = null
+                        },
+                        label = { Text("Agregar Skill Repo", fontSize = 11.sp, maxLines = 1) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = WorkstationColors.AccentGoldWash,
+                            selectedLabelColor = WorkstationColors.AccentGold,
+                            containerColor = WorkstationColors.SurfaceKeycap,
+                            labelColor = WorkstationColors.TextSecondary,
+                        ),
+                    )
+                    FilterChip(
+                        selected = mode == "init",
+                        onClick = {
+                            mode = "init"
+                            errorText = null
+                        },
+                        label = { Text(if (isRootGitRepo) "Cambiar Remote" else "Sync Propio (Init)", fontSize = 11.sp, maxLines = 1) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = WorkstationColors.AccentGoldWash,
+                            selectedLabelColor = WorkstationColors.AccentGold,
+                            containerColor = WorkstationColors.SurfaceKeycap,
+                            labelColor = WorkstationColors.TextSecondary,
+                        ),
+                    )
+                }
+
+                Text(
+                    text = if (mode == "add") {
+                        "Clona un repo Git dentro de ~/.gemini/config/skills/. Podrás actualizarlo con rebase+autostash sin perder mejoras del agente."
+                    } else {
+                        "Conecta ~/.gemini/config/skills/ a tu propio repo GitHub para hacer push de mejoras que haga el agente y sincronizar celular y tablet."
+                    },
+                    fontSize = 11.sp,
+                    color = WorkstationColors.TextSecondary,
+                )
+
+                OutlinedTextField(
+                    value = gitUrl,
+                    onValueChange = {
+                        gitUrl = it.trim().take(240)
+                        errorText = null
+                    },
+                    label = { Text("URL Git (https://... o git@github.com:...)", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    singleLine = true,
+                    isError = errorText != null,
+                    keyboardOptions = KeyboardOptions(
+                        autoCorrectEnabled = false,
+                        keyboardType = KeyboardType.Uri,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
+                if (mode == "add") {
+                    OutlinedTextField(
+                        value = folderName,
+                        onValueChange = {
+                            folderName = it.trim().take(48)
+                            errorText = null
+                        },
+                        label = { Text("Nombre carpeta (opcional)", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+
+                if (!errorText.isNullOrBlank()) {
+                    Text(
+                        text = errorText!!,
+                        fontSize = 11.sp,
+                        color = WorkstationColors.AccentRose,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val urlResult = com.termux.custom.skills.SkillsRepoManager.validateGitUrl(gitUrl)
+                    if (urlResult.isFailure) {
+                        errorText = urlResult.exceptionOrNull()?.message ?: "URL inválida"
+                        return@Button
+                    }
+                    val safeUrl = urlResult.getOrThrow()
+                    if (mode == "add") {
+                        if (folderName.isNotBlank()) {
+                            val nameRes = com.termux.custom.skills.SkillsRepoManager.validateSkillName(folderName)
+                            if (nameRes.isFailure) {
+                                errorText = nameRes.exceptionOrNull()?.message ?: "Nombre inválido"
+                                return@Button
+                            }
+                            onCloneSubRepo(safeUrl, nameRes.getOrThrow())
+                        } else {
+                            onCloneSubRepo(safeUrl, "")
+                        }
+                    } else {
+                        onConnectRootRepo(safeUrl)
+                    }
+                },
+                enabled = gitUrl.isNotBlank(),
+            ) {
+                Text(if (mode == "add") "Clonar" else "Conectar", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancelar", fontSize = 12.sp, color = WorkstationColors.TextSecondary)
+            }
+        },
+    )
 }

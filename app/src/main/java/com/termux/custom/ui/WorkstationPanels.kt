@@ -38,13 +38,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import com.termux.custom.agents.CodingAgentsState
 import com.termux.custom.agents.CodingProvider
 import com.termux.custom.data.AgentSessionRecord
 import com.termux.custom.guardian.GuardianStatus
 import com.termux.custom.security.OAuthTokenState
+import com.termux.custom.skills.SkillsSummaryState
 import com.termux.custom.storage.StorageMetrics
 import com.termux.custom.updater.ReleaseInfo
 import com.termux.custom.updater.UpdateState
@@ -59,8 +62,11 @@ internal fun AgentsWorkspacePanel(
     siteId: String,
     isBusy: Boolean,
     codingAgentsState: CodingAgentsState,
+    skillsState: SkillsSummaryState,
     onRefreshAgentsState: () -> Unit,
     onOpenCodingModelsDialog: () -> Unit,
+    onOpenAddSkillRepoDialog: () -> Unit,
+    onRunSkillsAction: (subcommand: String) -> Unit,
     onLaunchSafeCommand: (String) -> Unit,
     onNewContext: (title: String, agentType: String, summary: String) -> Unit,
     onExportDeltas: () -> Unit,
@@ -156,6 +162,190 @@ internal fun AgentsWorkspacePanel(
                         secondaryLabel = "Models",
                         onSecondaryClick = onOpenCodingModelsDialog,
                     )
+                }
+            }
+        }
+
+        // 1b. Unified Git Skills & Repos Hub (shared by agy, opencode, claude)
+        item(key = "unified_skills_repos_hub") {
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = WorkstationColors.SurfaceElevated,
+                border = BorderStroke(
+                    1.dp,
+                    if (skillsState.modifiedCount > 0) WorkstationColors.AccentAmber.copy(alpha = 0.45f)
+                    else WorkstationColors.BorderHairline,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = "Unified Skills & Repos",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = WorkstationColors.TextPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = if (skillsState.modifiedCount > 0) WorkstationColors.AccentAmberWash
+                            else if (skillsState.gitReposCount > 0) WorkstationColors.AccentEmeraldWash
+                            else WorkstationColors.SurfaceKeycap,
+                        ) {
+                            Text(
+                                text = when {
+                                    skillsState.modifiedCount > 0 -> "${skillsState.modifiedCount} EDITADOS"
+                                    skillsState.gitReposCount > 0 -> "${skillsState.totalCount} · ${skillsState.gitReposCount} GIT"
+                                    else -> "${skillsState.totalCount} LOCALES"
+                                },
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = when {
+                                    skillsState.modifiedCount > 0 -> WorkstationColors.AccentAmber
+                                    skillsState.gitReposCount > 0 -> WorkstationColors.AccentEmerald
+                                    else -> WorkstationColors.TextSecondary
+                                },
+                                maxLines = 1,
+                                softWrap = false,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = "~/.gemini/config/skills → agy · opencode · claude (rebase + autostash conserva mejoras del agente)",
+                        fontSize = 10.sp,
+                        color = WorkstationColors.TextSecondary,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+
+                    if (skillsState.skills.isNotEmpty()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            skillsState.skills.forEach { sk ->
+                                val dotColor = when {
+                                    sk.hasLocalEdits -> WorkstationColors.AccentAmber
+                                    sk.isGitRepo || skillsState.isRootGitRepo -> WorkstationColors.AccentEmerald
+                                    else -> WorkstationColors.AccentGold
+                                }
+                                Surface(
+                                    shape = RoundedCornerShape(7.dp),
+                                    color = WorkstationColors.SurfaceKeycap,
+                                    border = BorderStroke(1.dp, WorkstationColors.BorderHairline),
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(6.dp)
+                                                .clip(CircleShape)
+                                                .background(dotColor)
+                                        )
+                                        Text(
+                                            text = sk.name,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontSize = 10.sp,
+                                            color = WorkstationColors.TextPrimary,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Button(
+                            onClick = { onRunSkillsAction("update") },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(
+                                text = "Update",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = onOpenAddSkillRepoDialog,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                            border = BorderStroke(1.dp, WorkstationColors.BorderStrong),
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(
+                                text = "+ Repo",
+                                fontSize = 11.sp,
+                                color = WorkstationColors.AccentGold,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        OutlinedButton(
+                            onClick = { onRunSkillsAction("diff") },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                            border = BorderStroke(1.dp, WorkstationColors.BorderHairline),
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(
+                                text = "Diff",
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = { onRunSkillsAction("push") },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                            border = BorderStroke(
+                                1.dp,
+                                if (skillsState.modifiedCount > 0) WorkstationColors.AccentAmber.copy(alpha = 0.6f)
+                                else WorkstationColors.BorderHairline,
+                            ),
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(
+                                text = "Push",
+                                fontSize = 11.sp,
+                                color = if (skillsState.modifiedCount > 0) WorkstationColors.AccentAmber else WorkstationColors.TextPrimary,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
                 }
             }
         }

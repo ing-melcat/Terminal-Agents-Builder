@@ -6,7 +6,7 @@ set -eu
 
 PREFIX="/data/data/com.termux/files/usr"
 HOME_DIR="/data/data/com.termux/files/home"
-STAMP_FILE="$HOME_DIR/.config/melcat/.bootstrap_provisioned_v10"
+STAMP_FILE="$HOME_DIR/.config/melcat/.bootstrap_provisioned_v11"
 
 export PATH="$PREFIX/bin:$PATH"
 export HOME="$HOME_DIR"
@@ -52,21 +52,44 @@ for LINK_TARGET in \
     fi
 done
 
-# 2. Seed core active skills (senior-auditor, motion-framer, caveman) if not present
-for skill in senior-auditor motion-framer caveman; do
-    SKILL_DIR="$HOME_DIR/.gemini/config/skills/$skill"
-    mkdir -p "$SKILL_DIR"
-    if [ ! -f "$SKILL_DIR/SKILL.md" ]; then
-        cat > "$SKILL_DIR/SKILL.md" <<EOF
+# 2. Seed core active skills (senior-auditor, motion-framer, caveman) ONLY if absent (never overwrites agent/user edits!)
+mkdir -p "$HOME_DIR/.gemini/config/skills/senior-auditor" \
+         "$HOME_DIR/.gemini/config/skills/motion-framer" \
+         "$HOME_DIR/.gemini/config/skills/caveman"
+
+if [ ! -f "$HOME_DIR/.gemini/config/skills/senior-auditor/SKILL.md" ]; then
+    cat > "$HOME_DIR/.gemini/config/skills/senior-auditor/SKILL.md" <<'EOF'
 ---
-name: $skill
-description: Active workstation skill ($skill) provisioned by Terminal Agents Builder
+name: senior-auditor
+description: Ruthless security, concurrency, injection, and architecture code auditor (P0/P1/P2)
 ---
-# $skill
-Provisioned for arm64-v8a native Antigravity CLI (agy) & OpenCode v2 execution.
+# Senior Auditor
+Perform a strict production audit prioritized as P0 (Critical), P1 (High), and P2 (Medium) with exact file paths, line numbers, root causes, and concrete diffs.
+Always verify: command/option injection, file permissions (0600), race conditions, resource leaks, and backward compatibility.
 EOF
-    fi
-done
+fi
+
+if [ ! -f "$HOME_DIR/.gemini/config/skills/motion-framer/SKILL.md" ]; then
+    cat > "$HOME_DIR/.gemini/config/skills/motion-framer/SKILL.md" <<'EOF'
+---
+name: motion-framer
+description: High-craft 120Hz mobile/tablet UI & tactile motion designer
+---
+# Motion Framer
+Design responsive interfaces with clean visual hierarchy, crisp spacing, WindowInsets/IME safety on 360dp phones and tablets, and smooth spring micro-interactions without layout shifts or clipped labels.
+EOF
+fi
+
+if [ ! -f "$HOME_DIR/.gemini/config/skills/caveman/SKILL.md" ]; then
+    cat > "$HOME_DIR/.gemini/config/skills/caveman/SKILL.md" <<'EOF'
+---
+name: caveman
+description: Ultra-concise zero-fluff technical response mode for fast mobile terminal reading
+---
+# Caveman Mode
+Keep explanations ultra-brief, direct, and high-signal for narrow smartphone screens. Skip filler prose; output exact commands, root causes, and diffs first.
+EOF
+fi
 
 # 2b. Seed OpenCode v2 Termux touch-keyboard keybind fix (~/.config/opencode/cli.json) ONLY if absent.
 #     Android soft keyboards cannot emit Shift+Tab; binding agent.cycle to Tab lets users switch Build/Plan.
@@ -83,7 +106,7 @@ EOF
 fi
 
 # 3. Install Android browser launcher bridge (termux-open-url & xdg-open) so `agy` & `opencode` open Chrome natively
-cat > "$PREFIX/bin/termux-open-url" <<'EOF'
+cat > "$PREFIX/bin/termux-open-url.tmp.$$" <<'EOF'
 #!/data/data/com.termux/files/usr/bin/sh
 URL="${1:-}"
 if [ -z "$URL" ]; then
@@ -93,11 +116,12 @@ fi
 am start --user 0 -a android.intent.action.VIEW -d "$URL" >/dev/null 2>&1 || \
 am start -a android.intent.action.VIEW -d "$URL" >/dev/null 2>&1
 EOF
-chmod 0700 "$PREFIX/bin/termux-open-url"
+chmod 0700 "$PREFIX/bin/termux-open-url.tmp.$$"
+mv -f "$PREFIX/bin/termux-open-url.tmp.$$" "$PREFIX/bin/termux-open-url"
 ln -sf "$PREFIX/bin/termux-open-url" "$PREFIX/bin/xdg-open"
 
-# 4. Install melcat-gc (Storage & Cache Optimizer + zstd snapshot tool, strictly excluding OAuth & API vaults)
-cat > "$PREFIX/bin/melcat-gc" <<'EOF'
+# 4. Install melcat-gc (Storage & Cache Optimizer + zstd snapshot tool, strictly excluding OAuth, API vaults & git configs)
+cat > "$PREFIX/bin/melcat-gc.tmp.$$" <<'EOF'
 #!/data/data/com.termux/files/usr/bin/sh
 set -eu
 PREFIX="/data/data/com.termux/files/usr"
@@ -137,6 +161,7 @@ if [ "${1:-}" = "--snapshot" ]; then
             --exclude='.ssh*' \
             --exclude='.config/melcat/ssh-devices.json*' \
             --exclude='*id_ed25519*' --exclude='*id_rsa*' --exclude='*.pem' \
+            --exclude='*/.git/config' \
             --exclude='.gemini/antigravity-cli/antigravity-oauth-token' \
             --exclude='.config/antigravity/antigravity-oauth-token' \
             --exclude='.gemini/antigravity-oauth-token' \
@@ -163,6 +188,7 @@ if [ "${1:-}" = "--snapshot" ]; then
             --exclude='.ssh*' \
             --exclude='.config/melcat/ssh-devices.json*' \
             --exclude='*id_ed25519*' --exclude='*id_rsa*' --exclude='*.pem' \
+            --exclude='*/.git/config' \
             --exclude='.gemini/antigravity-cli/antigravity-oauth-token' \
             --exclude='.config/antigravity/antigravity-oauth-token' \
             --exclude='.gemini/antigravity-oauth-token' \
@@ -185,10 +211,11 @@ fi
 
 df -h "$PREFIX" | tail -n 1 | awk '{print "[storage-gc] Free storage: " $4 " (" $5 " used)"}'
 EOF
-chmod 0700 "$PREFIX/bin/melcat-gc"
+chmod 0700 "$PREFIX/bin/melcat-gc.tmp.$$"
+mv -f "$PREFIX/bin/melcat-gc.tmp.$$" "$PREFIX/bin/melcat-gc"
 
 # 5. Install `workstation` controller CLI (keeps `$PREFIX/bin/agy` and `$PREFIX/bin/opencode` dedicated to real binaries)
-cat > "$PREFIX/bin/workstation" <<'EOF'
+cat > "$PREFIX/bin/workstation.tmp.$$" <<'EOF'
 #!/data/data/com.termux/files/usr/bin/sh
 set -eu
 PREFIX="/data/data/com.termux/files/usr"
@@ -288,9 +315,16 @@ PINEOF
     pkg update -y
     pkg install -y -o Dpkg::Options::=--force-confold --allow-downgrades opencode
 
-    mkdir -p "$HOME_DIR/.config/opencode"
+    mkdir -p "$HOME_DIR/.config/opencode" "$SKILLS_DIR"
     if [ ! -L "$HOME_DIR/.config/opencode/skills" ]; then
-        rm -rf "$HOME_DIR/.config/opencode/skills"
+        if [ -d "$HOME_DIR/.config/opencode/skills" ]; then
+            cp -rn "$HOME_DIR/.config/opencode/skills/." "$SKILLS_DIR/" 2>/dev/null || \
+                cp -r "$HOME_DIR/.config/opencode/skills/." "$SKILLS_DIR/" 2>/dev/null || true
+            rm -rf "$HOME_DIR/.config/opencode/skills"
+        elif [ -e "$HOME_DIR/.config/opencode/skills" ]; then
+            mv -f "$HOME_DIR/.config/opencode/skills" "$HOME_DIR/.config/opencode/skills.bak.$(date +%s)" 2>/dev/null || \
+                rm -f "$HOME_DIR/.config/opencode/skills"
+        fi
         ln -s "$SKILLS_DIR" "$HOME_DIR/.config/opencode/skills"
     fi
     if [ ! -s "$HOME_DIR/.config/opencode/cli.json" ]; then
@@ -330,6 +364,396 @@ install_openssh() {
     fi
 }
 
+validate_git_url() {
+    RAW="$1"
+    [ -n "$RAW" ] || return 1
+    [ "${#RAW}" -le 240 ] || return 1
+    [ "$(printf '%s\n' "$RAW" | wc -l | tr -d ' ')" -eq 1 ] || return 1
+    case "$RAW" in
+        -*|*[[:cntrl:]]*|*" "*|*"	"*|*".."*|*"$"*|*";"*|*"|"*|*"&"*|*"\`"*|ext::*|file:*)
+            return 1
+            ;;
+        https://*/*|ssh://*/*|*@*:*)
+            printf '%s\n' "$RAW" | grep -Eq '^(https|ssh)://([A-Za-z0-9._-]+@)?[A-Za-z0-9][A-Za-z0-9.-]{0,252}(:[0-9]{1,5})?/[A-Za-z0-9._~][A-Za-z0-9._~/-]{0,199}$|^[A-Za-z0-9._-]+@[A-Za-z0-9][A-Za-z0-9.-]{0,252}:[A-Za-z0-9._][A-Za-z0-9._/-]{1,199}$'
+            return $?
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+validate_skill_name() {
+    RAW="$1"
+    [ -n "$RAW" ] || return 1
+    [ "$(printf '%s\n' "$RAW" | wc -l | tr -d ' ')" -eq 1 ] || return 1
+    case "$RAW" in
+        -*|*[[:cntrl:]]*|*/*|*\\*|*..*|*" "*|*"	"*)
+            return 1
+            ;;
+        *)
+            printf '%s\n' "$RAW" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$'
+            return $?
+            ;;
+    esac
+}
+
+require_git() {
+    if ! command -v git >/dev/null 2>&1; then
+        echo "[skills] git is not installed. Run 'pkg install -y git' or 'workstation setup'." >&2
+        return 1
+    fi
+}
+
+ensure_git_identity() {
+    REPO_DIR="$1"
+    if [ -z "$(git -C "$REPO_DIR" config user.name 2>/dev/null || true)" ]; then
+        git -C "$REPO_DIR" config user.name "RUR Workstation"
+    fi
+    if [ -z "$(git -C "$REPO_DIR" config user.email 2>/dev/null || true)" ]; then
+        git -C "$REPO_DIR" config user.email "workstation@rur.local"
+    fi
+}
+
+# Keep cloned sub-repos excluded from root ~/.gemini/config/skills/.git so they never create broken 160000 gitlinks
+sync_root_subrepo_excludes() {
+    [ -d "$SKILLS_DIR/.git" ] || return 0
+    EXCLUDE_FILE="$SKILLS_DIR/.git/info/exclude"
+    mkdir -p "$SKILLS_DIR/.git/info"
+    TMP_EX="$EXCLUDE_FILE.tmp.$$"
+    if [ -f "$EXCLUDE_FILE" ]; then
+        awk '
+            /^# >>> RUR-SUBREPOS >>>$/ { skip=1; next }
+            /^# <<< RUR-SUBREPOS <<<$/ { skip=0; next }
+            !skip { print }
+        ' "$EXCLUDE_FILE" > "$TMP_EX"
+    else
+        : > "$TMP_EX"
+    fi
+    printf '# >>> RUR-SUBREPOS >>>\n' >> "$TMP_EX"
+    for sub in "$SKILLS_DIR"/*; do
+        if [ -d "$sub/.git" ]; then
+            printf '/%s/\n' "$(basename -- "$sub")" >> "$TMP_EX"
+        fi
+    done
+    printf '# <<< RUR-SUBREPOS <<<\n' >> "$TMP_EX"
+    mv -f "$TMP_EX" "$EXCLUDE_FILE"
+}
+
+update_single_skill_repo() {
+    REPO_DIR="$1"
+    REPO_LABEL="$2"
+    if ! git -C "$REPO_DIR" remote get-url origin >/dev/null 2>&1; then
+        echo "  [skip]    $REPO_LABEL (git repo without 'origin' remote)"
+        return 0
+    fi
+    BRANCH="$(git -C "$REPO_DIR" symbolic-ref --short -q HEAD 2>/dev/null || true)"
+    if [ -z "$BRANCH" ]; then
+        echo "  [skip]    $REPO_LABEL (detached HEAD — switch to a branch to sync)" >&2
+        return 0
+    fi
+    echo "  [sync]    $REPO_LABEL ($BRANCH) ..."
+    git -C "$REPO_DIR" fetch --prune origin 2>&1 || {
+        echo "  [warn]    $REPO_LABEL: fetch failed (offline or auth required)" >&2
+        return 0
+    }
+
+    # Unborn HEAD (fresh `workstation skills init <url>` on Device 2 syncing an existing remote repo)
+    if ! git -C "$REPO_DIR" rev-parse --verify HEAD >/dev/null 2>&1; then
+        TARGET_BRANCH="$BRANCH"
+        if ! git -C "$REPO_DIR" rev-parse --verify "refs/remotes/origin/$TARGET_BRANCH" >/dev/null 2>&1; then
+            REMOTE_SYM="$(git -C "$REPO_DIR" symbolic-ref --short -q refs/remotes/origin/HEAD 2>/dev/null || true)"
+            if [ -n "$REMOTE_SYM" ] && git -C "$REPO_DIR" rev-parse --verify "refs/remotes/$REMOTE_SYM" >/dev/null 2>&1; then
+                TARGET_BRANCH="${REMOTE_SYM#origin/}"
+            elif git -C "$REPO_DIR" rev-parse --verify "refs/remotes/origin/main" >/dev/null 2>&1; then
+                TARGET_BRANCH="main"
+            elif git -C "$REPO_DIR" rev-parse --verify "refs/remotes/origin/master" >/dev/null 2>&1; then
+                TARGET_BRANCH="master"
+            else
+                echo "  [skip]    $REPO_LABEL: remote branch origin/$BRANCH not found yet (run 'workstation skills push' first)"
+                return 0
+            fi
+        fi
+
+        # Move any colliding untracked local seed files into a safe backup dir before initial checkout
+        BACKUP_DIR=""
+        git -C "$REPO_DIR" ls-tree -r --name-only "refs/remotes/origin/$TARGET_BRANCH" | while IFS= read -r remote_rel; do
+            [ -n "$remote_rel" ] || continue
+            if [ -e "$REPO_DIR/$remote_rel" ]; then
+                if [ -z "$BACKUP_DIR" ]; then
+                    BACKUP_DIR="$HOME_DIR/.config/melcat/skills-pre-sync-$(date +%Y%m%d-%H%M%S)"
+                    mkdir -p "$BACKUP_DIR"
+                    echo "  [backup]  Backing up local seed collisions to $BACKUP_DIR"
+                fi
+                DEST_BAK="$BACKUP_DIR/$remote_rel"
+                mkdir -p "$(dirname -- "$DEST_BAK")"
+                mv -f -- "$REPO_DIR/$remote_rel" "$DEST_BAK"
+            fi
+        done
+
+        if git -C "$REPO_DIR" checkout -B "$TARGET_BRANCH" "refs/remotes/origin/$TARGET_BRANCH" 2>&1; then
+            echo "  [ok]      $REPO_LABEL initialized from origin/$TARGET_BRANCH"
+        else
+            echo "  [warn]    $REPO_LABEL: initial sync failed — local files preserved" >&2
+        fi
+        return 0
+    fi
+
+    if ! git -C "$REPO_DIR" rev-parse --verify "refs/remotes/origin/$BRANCH" >/dev/null 2>&1; then
+        echo "  [skip]    $REPO_LABEL: remote branch origin/$BRANCH not found yet (run 'workstation skills push' first)"
+        return 0
+    fi
+
+    ensure_git_identity "$REPO_DIR"
+    PREV_HEAD="$(git -C "$REPO_DIR" rev-parse HEAD)"
+    STASH_BEFORE="$(git -C "$REPO_DIR" rev-parse -q --verify refs/stash 2>/dev/null || true)"
+    DID_STASH=0
+    if [ -n "$(git -C "$REPO_DIR" status --porcelain 2>/dev/null || true)" ]; then
+        if ! git -C "$REPO_DIR" stash push --include-untracked -m "rur-skills-autostash" >/dev/null 2>&1; then
+            echo "  [warn]    $REPO_LABEL: could not autostash local edits — skipping update safely." >&2
+            return 0
+        fi
+        STASH_AFTER="$(git -C "$REPO_DIR" rev-parse -q --verify refs/stash 2>/dev/null || true)"
+        if [ -n "$STASH_AFTER" ] && [ "$STASH_AFTER" != "$STASH_BEFORE" ]; then
+            DID_STASH=1
+        fi
+    fi
+
+    if ! git -C "$REPO_DIR" rebase "refs/remotes/origin/$BRANCH" 2>&1; then
+        git -C "$REPO_DIR" rebase --abort >/dev/null 2>&1 || true
+        if [ "$DID_STASH" -eq 1 ]; then
+            if ! git -C "$REPO_DIR" stash pop --quiet 2>/dev/null; then
+                echo "  [warn]    $REPO_LABEL: rebase aborted; local edits remain safely in 'git stash list' (rur-skills-autostash)." >&2
+                return 0
+            fi
+        fi
+        echo "  [conflict] $REPO_LABEL: rebase aborted cleanly — your local agent edits are untouched. Run 'workstation skills diff'." >&2
+        return 0
+    fi
+
+    if [ "$DID_STASH" -eq 1 ]; then
+        if git -C "$REPO_DIR" stash apply --quiet 2>/dev/null && [ -z "$(git -C "$REPO_DIR" ls-files -u 2>/dev/null || true)" ]; then
+            git -C "$REPO_DIR" stash drop --quiet >/dev/null 2>&1 || true
+            echo "  [ok]      $REPO_LABEL updated (local agent edits preserved)"
+        else
+            git -C "$REPO_DIR" reset --hard "$PREV_HEAD" >/dev/null 2>&1 || true
+            # Clean exact untracked paths unpacked by failed stash apply before restoring stash@{0}
+            if git -C "$REPO_DIR" rev-parse -q --verify 'stash@{0}^3' >/dev/null 2>&1; then
+                git -C "$REPO_DIR" ls-tree -r --name-only 'stash@{0}^3' | while IFS= read -r rel_path; do
+                    [ -n "$rel_path" ] && rm -f -- "$REPO_DIR/$rel_path"
+                done
+            fi
+            if git -C "$REPO_DIR" stash pop --quiet 2>/dev/null; then
+                echo "  [conflict] $REPO_LABEL: local agent edits conflict with upstream — rolled back cleanly (zero conflict markers). Run 'workstation skills diff' or push first." >&2
+            else
+                echo "  [warn]    $REPO_LABEL: rolled back to $PREV_HEAD; your local edits are safely preserved in 'git stash list' (rur-skills-autostash)." >&2
+            fi
+        fi
+    else
+        echo "  [ok]      $REPO_LABEL updated"
+    fi
+}
+
+push_single_skill_repo() {
+    REPO_DIR="$1"
+    REPO_LABEL="$2"
+    COMMIT_MSG="$3"
+    if ! git -C "$REPO_DIR" remote get-url origin >/dev/null 2>&1; then
+        return 0
+    fi
+    BRANCH="$(git -C "$REPO_DIR" symbolic-ref --short -q HEAD 2>/dev/null || true)"
+    if [ -z "$BRANCH" ]; then
+        echo "  [skip]    $REPO_LABEL (detached HEAD — checkout a branch before pushing)" >&2
+        return 0
+    fi
+    STATUS="$(git -C "$REPO_DIR" status --porcelain 2>/dev/null || true)"
+    if [ -z "$STATUS" ]; then
+        echo "  [clean]   $REPO_LABEL (nothing new to commit)"
+    else
+        ensure_git_identity "$REPO_DIR"
+        git -C "$REPO_DIR" add -A
+        if ! git -C "$REPO_DIR" diff --cached --quiet 2>/dev/null; then
+            if ! git -C "$REPO_DIR" commit -m "$COMMIT_MSG"; then
+                echo "  [warn]    $REPO_LABEL: commit failed — skipping push" >&2
+                return 0
+            fi
+        fi
+    fi
+    if ! git -C "$REPO_DIR" rev-parse --verify HEAD >/dev/null 2>&1; then
+        echo "  [skip]    $REPO_LABEL (no commits to push yet)"
+        return 0
+    fi
+    if git -C "$REPO_DIR" push -u origin -- "refs/heads/$BRANCH:refs/heads/$BRANCH" 2>&1; then
+        echo "  [pushed]  $REPO_LABEL -> origin/$BRANCH"
+    else
+        echo "  [warn]    $REPO_LABEL: push failed (verify git/SSH credentials or remote URL)" >&2
+    fi
+}
+
+manage_skills() {
+    SUB="${1:-list}"
+    shift 2>/dev/null || true
+    mkdir -p "$SKILLS_DIR"
+
+    case "$SUB" in
+        list|ls|status)
+            sync_root_subrepo_excludes
+            echo "[skills] Unified Skills Hub: $SKILLS_DIR"
+            echo "         Symlinked to: agy (~/.gemini/antigravity-cli/skills), opencode (~/.config/opencode/skills), claude (~/.claude/skills)"
+            if [ -d "$SKILLS_DIR/.git" ] && command -v git >/dev/null 2>&1; then
+                RB="$(git -C "$SKILLS_DIR" symbolic-ref --short -q HEAD 2>/dev/null || echo 'detached')"
+                RR="$(git -C "$SKILLS_DIR" remote get-url origin 2>/dev/null || echo 'no-remote')"
+                RD="$(git -C "$SKILLS_DIR" --no-optional-locks status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+                echo "         Root Git Repo: branch=$RB · remote=$RR · pending=$RD"
+            fi
+            echo "------------------------------------------------------------"
+            FOUND=0
+            for d in "$SKILLS_DIR"/*; do
+                [ -d "$d" ] || continue
+                NAME="$(basename -- "$d")"
+                FOUND=1
+                if [ -d "$d/.git" ] && command -v git >/dev/null 2>&1; then
+                    BR="$(git -C "$d" symbolic-ref --short -q HEAD 2>/dev/null || echo 'detached')"
+                    DIRTY="$(git -C "$d" --no-optional-locks status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+                    if [ "$DIRTY" != "0" ]; then
+                        echo "  [git* ] $NAME (branch: $BR, $DIRTY local change(s))"
+                    else
+                        echo "  [git  ] $NAME (branch: $BR, clean)"
+                    fi
+                else
+                    echo "  [local] $NAME"
+                fi
+            done
+            if [ "$FOUND" -eq 0 ]; then
+                echo "  (no skills installed yet)"
+            fi
+            ;;
+        init)
+            require_git
+            REMOTE_URL="${1:-}"
+            if [ -n "$REMOTE_URL" ] && ! validate_git_url "$REMOTE_URL"; then
+                echo "[skills] ERROR: Invalid Git URL: $REMOTE_URL" >&2
+                return 1
+            fi
+            if [ ! -d "$SKILLS_DIR/.git" ]; then
+                git -C "$SKILLS_DIR" init -b main 2>/dev/null || git -C "$SKILLS_DIR" init
+                if [ ! -f "$SKILLS_DIR/.gitignore" ]; then
+                    printf '.DS_Store\n*.tmp\n*.bak.*\n' > "$SKILLS_DIR/.gitignore"
+                fi
+                echo "[skills] Initialized Git skills repository in $SKILLS_DIR"
+            fi
+            sync_root_subrepo_excludes
+            if [ -n "$REMOTE_URL" ]; then
+                if git -C "$SKILLS_DIR" remote get-url origin >/dev/null 2>&1; then
+                    git -C "$SKILLS_DIR" remote set-url -- origin "$REMOTE_URL"
+                else
+                    git -C "$SKILLS_DIR" remote add -- origin "$REMOTE_URL"
+                fi
+                echo "[skills] Connected origin -> $REMOTE_URL"
+                echo "[skills] Run 'workstation skills push' to back up your skills, or 'workstation skills update' to pull."
+            else
+                echo "[skills] Local Git initialized. Connect a remote anytime with: workstation skills init <git-url>"
+            fi
+            ;;
+        add|clone)
+            require_git
+            URL="${1:-}"
+            CUSTOM_NAME="${2:-}"
+            if ! validate_git_url "$URL"; then
+                echo "[skills] ERROR: Provide a valid remote Git URL (https://, ssh://, or git@host:org/repo.git)." >&2
+                return 1
+            fi
+            if [ -n "$CUSTOM_NAME" ]; then
+                NAME="$CUSTOM_NAME"
+            else
+                TRIMMED_URL="${URL%/}"
+                REPO_TAIL="${TRIMMED_URL##*:}"
+                NAME="$(basename -- "$REPO_TAIL" .git)"
+            fi
+            if ! validate_skill_name "$NAME"; then
+                echo "[skills] ERROR: Invalid skill folder name: $NAME" >&2
+                return 1
+            fi
+            DEST="$SKILLS_DIR/$NAME"
+            if [ -e "$DEST" ]; then
+                echo "[skills] ERROR: '$DEST' already exists. Run 'workstation skills update' or choose a different name." >&2
+                return 1
+            fi
+            echo "[skills] Cloning skill repository into $DEST ..."
+            git clone --depth=1 -- "$URL" "$DEST"
+            sync_root_subrepo_excludes
+            echo "[skills] Ready! '$NAME' is now active across agy, opencode, and claude."
+            ;;
+        update|pull|sync)
+            require_git
+            sync_root_subrepo_excludes
+            echo "[skills] Updating Git skill repositories (rebase + autostash preserves local agent edits)..."
+            ANY=0
+            if [ -d "$SKILLS_DIR/.git" ]; then
+                ANY=1
+                update_single_skill_repo "$SKILLS_DIR" "root ($SKILLS_DIR)"
+            fi
+            for d in "$SKILLS_DIR"/*; do
+                if [ -d "$d/.git" ]; then
+                    ANY=1
+                    update_single_skill_repo "$d" "$(basename -- "$d")"
+                fi
+            done
+            if [ "$ANY" -eq 0 ]; then
+                echo "[skills] No Git skill repos configured yet."
+                echo "         Add one with: workstation skills add <git-url>"
+                echo "         Or track all your local skills in GitHub: workstation skills init <your-repo-url>"
+            fi
+            ;;
+        diff|changes)
+            require_git
+            sync_root_subrepo_excludes
+            ANY=0
+            if [ -d "$SKILLS_DIR/.git" ]; then
+                ANY=1
+                echo "=== root ($SKILLS_DIR) ==="
+                git -C "$SKILLS_DIR" status -s
+                git -C "$SKILLS_DIR" diff
+            fi
+            for d in "$SKILLS_DIR"/*; do
+                if [ -d "$d/.git" ]; then
+                    ANY=1
+                    echo "=== $(basename -- "$d") ==="
+                    git -C "$d" status -s
+                    git -C "$d" diff
+                fi
+            done
+            if [ "$ANY" -eq 0 ]; then
+                echo "[skills] No Git skill repos yet. Run 'workstation skills init <git-url>' to start tracking AI skill edits."
+            fi
+            ;;
+        push|save)
+            require_git
+            sync_root_subrepo_excludes
+            MSG="${1:-chore(skills): sync agent skill improvements from RUR workstation}"
+            ANY=0
+            if [ -d "$SKILLS_DIR/.git" ] && git -C "$SKILLS_DIR" remote get-url origin >/dev/null 2>&1; then
+                ANY=1
+                push_single_skill_repo "$SKILLS_DIR" "root ($SKILLS_DIR)" "$MSG"
+            fi
+            for d in "$SKILLS_DIR"/*; do
+                if [ -d "$d/.git" ] && git -C "$d" remote get-url origin >/dev/null 2>&1; then
+                    ANY=1
+                    push_single_skill_repo "$d" "$(basename -- "$d")" "$MSG"
+                fi
+            done
+            if [ "$ANY" -eq 0 ]; then
+                echo "[skills] No Git remote ('origin') configured yet."
+                echo "         Connect your own skills repo first: workstation skills init <your-github-repo-url>"
+            fi
+            ;;
+        *)
+            echo "Usage: workstation skills [list | init [git-url] | add <git-url> [name] | update | diff | push [msg]]" >&2
+            return 2
+            ;;
+    esac
+}
+
 print_help() {
     echo "============================================================"
     echo " Terminal Agents Builder (RUR) — Workstation Controller"
@@ -365,7 +789,7 @@ print_help() {
     echo "   workstation install-ssh     -> Install native OpenSSH client (LAN & Tailscale)"
     echo "   workstation upgrade         -> Upgrade Termux packages (incl. opencode) + agy"
     echo "   workstation doctor          -> Diagnose agy, opencode, ssh, glibc, TLS & vaults"
-    echo "   workstation skills          -> List unified agy/opencode/claude skills"
+    echo "   workstation skills [cmd]    -> Manage Git skill repos (list|init|add|update|diff|push)"
     echo "   workstation token           -> Check Antigravity OAuth & Coding Vault 0600"
     echo "   workstation ui [ssh|agents] -> Bring 120Hz Workstation UI (or panel) to front"
     echo "   melcat-gc                   -> Clean caches & create zstd backups"
@@ -403,9 +827,8 @@ case "${1:-ui}" in
         echo "[workstation] Upgrade complete."
         ;;
     skills|--skills)
-        echo "[workstation] Active global skills in $SKILLS_DIR:"
-        ls -1 "$SKILLS_DIR" 2>/dev/null || true
-        echo "  -> symlinked to ~/.gemini/antigravity-cli/skills, ~/.config/opencode/skills & ~/.claude/skills"
+        shift
+        manage_skills "$@"
         ;;
     token|--token)
         if TF="$(find_active_token 2>/dev/null)"; then
@@ -496,12 +919,13 @@ case "${1:-ui}" in
         ;;
 esac
 EOF
-chmod 0700 "$PREFIX/bin/workstation"
+chmod 0700 "$PREFIX/bin/workstation.tmp.$$"
+mv -f "$PREFIX/bin/workstation.tmp.$$" "$PREFIX/bin/workstation"
 
 # 6. Install first-run `agy` bootstrapper ONLY if the real native Antigravity CLI (`agy.va39`) is not installed yet.
 #    Once installed, `$PREFIX/bin/agy` is the real C bootstrapper + `$PREFIX/bin/agy.va39` and is NEVER overwritten!
 if [ ! -x "$PREFIX/bin/agy.va39" ]; then
-    cat > "$PREFIX/bin/agy" <<'EOF'
+    cat > "$PREFIX/bin/agy.tmp.$$" <<'EOF'
 #!/data/data/com.termux/files/usr/bin/sh
 set -eu
 PREFIX="/data/data/com.termux/files/usr"
@@ -512,7 +936,8 @@ if [ -x "$PREFIX/bin/agy.va39" ] && [ -x "$PREFIX/bin/agy" ]; then
 fi
 exit 1
 EOF
-    chmod 0700 "$PREFIX/bin/agy"
+    chmod 0700 "$PREFIX/bin/agy.tmp.$$"
+    mv -f "$PREFIX/bin/agy.tmp.$$" "$PREFIX/bin/agy"
 fi
 
 # 7. Configure shell profiles (~/.bashrc and ~/.zshrc) cleanly for real Antigravity CLI, OpenCode & 0600 vault env

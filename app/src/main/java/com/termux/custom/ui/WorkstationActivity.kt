@@ -71,6 +71,8 @@ import com.termux.custom.guardian.ProcessGuardianService
 import com.termux.custom.provisioning.CustomBootstrapProvisioner
 import com.termux.custom.security.AntigravityTokenWarden
 import com.termux.custom.security.OAuthTokenState
+import com.termux.custom.skills.SkillsRepoManager
+import com.termux.custom.skills.SkillsSummaryState
 import com.termux.custom.ssh.SshDeviceRecord
 import com.termux.custom.ssh.SshDevicesManager
 import com.termux.custom.ssh.SshPanelState
@@ -95,6 +97,7 @@ class WorkstationActivity : ComponentActivity(), ServiceConnection {
     private lateinit var crdtDatabase: LocalFirstCrdtDatabase
     private lateinit var tokenWarden: AntigravityTokenWarden
     private lateinit var codingAgentsManager: CodingAgentsManager
+    private lateinit var skillsRepoManager: SkillsRepoManager
     private lateinit var sshDevicesManager: SshDevicesManager
     private lateinit var storageOptimizer: StorageOptimizer
     private lateinit var releaseUpdater: GitHubReleaseUpdater
@@ -114,6 +117,7 @@ class WorkstationActivity : ComponentActivity(), ServiceConnection {
         crdtDatabase = LocalFirstCrdtDatabase.getInstance(this)
         tokenWarden = AntigravityTokenWarden(this)
         codingAgentsManager = CodingAgentsManager()
+        skillsRepoManager = SkillsRepoManager()
         sshDevicesManager = SshDevicesManager(context = this)
         storageOptimizer = StorageOptimizer()
         releaseUpdater = GitHubReleaseUpdater(this)
@@ -138,6 +142,7 @@ class WorkstationActivity : ComponentActivity(), ServiceConnection {
                     crdtDatabase = crdtDatabase,
                     tokenWarden = tokenWarden,
                     codingAgentsManager = codingAgentsManager,
+                    skillsRepoManager = skillsRepoManager,
                     sshDevicesManager = sshDevicesManager,
                     storageOptimizer = storageOptimizer,
                     releaseUpdater = releaseUpdater,
@@ -262,6 +267,7 @@ private fun WorkstationRoot(
     crdtDatabase: LocalFirstCrdtDatabase,
     tokenWarden: AntigravityTokenWarden,
     codingAgentsManager: CodingAgentsManager,
+    skillsRepoManager: SkillsRepoManager,
     sshDevicesManager: SshDevicesManager,
     storageOptimizer: StorageOptimizer,
     releaseUpdater: GitHubReleaseUpdater,
@@ -297,6 +303,7 @@ private fun WorkstationRoot(
     var tokenDialogError by rememberSaveable { mutableStateOf<String?>(null) }
     var isCodingModelsDialogOpen by rememberSaveable { mutableStateOf(false) }
     var codingModelsDialogError by rememberSaveable { mutableStateOf<String?>(null) }
+    var isAddSkillRepoDialogOpen by rememberSaveable { mutableStateOf(false) }
     var isOtaTokenDialogOpen by rememberSaveable { mutableStateOf(false) }
     var isTutorialOpen by rememberSaveable { mutableStateOf(false) }
     var completedTutorialSteps by remember {
@@ -389,6 +396,8 @@ private fun WorkstationRoot(
             )
         )
     }
+    var skillsState by remember { mutableStateOf(SkillsSummaryState()) }
+    var skillsRefreshJob by remember { mutableStateOf<Job?>(null) }
     var sshPanelState by remember { mutableStateOf(SshPanelState()) }
     var sshScanJob by remember { mutableStateOf<Job?>(null) }
     var sshScanGen by remember { mutableIntStateOf(0) }
@@ -404,7 +413,20 @@ private fun WorkstationRoot(
         WorkstationFormFactor.TABLET_PORTRAIT -> isPortraitSheetOpen && inspectorTab == InspectorTab.SSH
         WorkstationFormFactor.TABLET_LANDSCAPE -> !isZenMode && inspectorTab == InspectorTab.SSH
     }
+    val isAgentsPanelVisible = when (formFactor) {
+        WorkstationFormFactor.PHONE_PORTRAIT,
+        WorkstationFormFactor.PHONE_LANDSCAPE -> primaryTab == PrimaryTab.AGENTS
+        WorkstationFormFactor.TABLET_PORTRAIT -> isPortraitSheetOpen && inspectorTab == InspectorTab.AGENTS
+        WorkstationFormFactor.TABLET_LANDSCAPE -> !isZenMode && inspectorTab == InspectorTab.AGENTS
+    }
     val latestSshPanelVisible by rememberUpdatedState(isSshPanelVisible)
+
+    fun refreshSkillsState() {
+        skillsRefreshJob?.cancel()
+        skillsRefreshJob = scope.launch {
+            skillsState = skillsRepoManager.inspectSkills()
+        }
+    }
 
     fun cancelSshScan() {
         sshScanJob?.cancel()
@@ -599,9 +621,11 @@ private fun WorkstationRoot(
                     surfaceBridge.apply120HzFramePacing(activity)
                     surfaceBridge.terminalView.onScreenUpdated()
                     if (primaryTab == PrimaryTab.TERMINAL &&
+                        !isPortraitSheetOpen &&
                         !isCommandPaletteOpen &&
                         !isTokenDialogOpen &&
                         !isCodingModelsDialogOpen &&
+                        !isAddSkillRepoDialogOpen &&
                         !isOtaTokenDialogOpen &&
                         !isTutorialOpen &&
                         !isSshEditorOpen &&
@@ -609,6 +633,7 @@ private fun WorkstationRoot(
                     ) {
                         surfaceBridge.terminalView.post { surfaceBridge.terminalView.requestFocus() }
                     }
+                    refreshSkillsState()
                     scope.launch {
                         ProcessGuardianService.refreshSnapshot(context)
                         tokenState = tokenWarden.inspectTokenState()
@@ -626,6 +651,8 @@ private fun WorkstationRoot(
                 }
                 Lifecycle.Event.ON_STOP -> {
                     cancelSshScan()
+                    skillsRefreshJob?.cancel()
+                    skillsRefreshJob = null
                     surfaceBridge.setCursorBlinker(false)
                     service?.setCustomTerminalSessionClient(null)
                 }
@@ -648,6 +675,7 @@ private fun WorkstationRoot(
     LaunchedEffect(Unit) {
         surfaceBridge.apply120HzFramePacing(activity)
         crdtDatabase.seedDefaultsIfFirstRun()
+        refreshSkillsState()
         tokenState = tokenWarden.inspectTokenState()
         codingAgentsState = codingAgentsManager.inspectState()
         sshPanelState = sshDevicesManager.inspectEnvironmentAndDevices(sshPanelState.probes)
@@ -655,6 +683,14 @@ private fun WorkstationRoot(
         releaseUpdater.refreshTokenState()
         ProcessGuardianService.refreshSnapshot(context)
         releaseUpdater.checkForUpdate(silentOnNetworkError = true)
+    }
+
+    // Auto-refresh Agents & Skills status whenever the Agents panel becomes visible or PTY sessions change while visible
+    LaunchedEffect(isAgentsPanelVisible, sessionListVersion) {
+        if (isAgentsPanelVisible) {
+            refreshSkillsState()
+            codingAgentsState = codingAgentsManager.inspectState()
+        }
     }
 
     // Automatically probe live SSH reachability & Tailscale status whenever the SSH panel opens
@@ -825,6 +861,42 @@ private fun WorkstationRoot(
         }
     }
 
+    fun spawnSkillsPtySession(subcommand: String, extraArgs: List<String> = emptyList()) {
+        if (!bootstrapReady && !CustomBootstrapProvisioner.isBootstrapInstalled()) {
+            onEnsureBootstrap()
+            notify("Extracting arm64 Linux runtime…")
+            return
+        }
+        val service = termuxService
+        if (service == null) {
+            notify("TermuxService aún iniciando…", showSnackbar = true)
+            return
+        }
+        val execPair = runCatching { skillsRepoManager.buildSkillsPtyExec(subcommand, extraArgs) }.getOrElse { err ->
+            notify(err.message ?: "Parámetros de skills inválidos", showSnackbar = true)
+            return
+        }
+        val created = runCatching {
+            service.createTermuxSession(
+                execPair.first,
+                execPair.second,
+                null,
+                TermuxConstants.TERMUX_HOME_DIR_PATH,
+                false,
+                "skills:$subcommand",
+            )
+        }.getOrNull()
+        if (created != null) {
+            activeSessionIndex = (service.termuxSessions.size - 1).coerceAtLeast(0)
+            sessionListVersion++
+            primaryTab = PrimaryTab.TERMINAL
+            isPortraitSheetOpen = false
+            notify("Skills → workstation skills $subcommand", showSnackbar = true)
+        } else {
+            notify("No se pudo abrir la pestaña de skills", showSnackbar = true)
+        }
+    }
+
     val onInstallReadyApk: (File) -> Unit = { apkFile ->
         val launched = releaseUpdater.launchApkInstaller(context, apkFile)
         notify(
@@ -841,7 +913,7 @@ private fun WorkstationRoot(
                 dispatchCommandToPty("workstation setup && workstation doctor")
             }
             TutorialStep.ACTIVATE_SKILLS -> {
-                dispatchCommandToPty("workstation skills")
+                spawnSkillsPtySession("list")
             }
             TutorialStep.OAUTH_VAULT_0600 -> {
                 dispatchCommandToPty("agy")
@@ -881,16 +953,24 @@ private fun WorkstationRoot(
                     siteId = crdtDatabase.siteId,
                     isBusy = isAgentsBusy,
                     codingAgentsState = codingAgentsState,
+                    skillsState = skillsState,
                     onRefreshAgentsState = {
                         scope.launch {
                             codingAgentsState = codingAgentsManager.inspectState()
-                            notify("Agent status refreshed")
+                            skillsState = skillsRepoManager.inspectSkills()
+                            notify("Agent & skills status refreshed")
                         }
                     },
                     onOpenCodingModelsDialog = {
                         codingModelsDialogError = null
                         scope.launch { codingAgentsState = codingAgentsManager.inspectState() }
                         isCodingModelsDialogOpen = true
+                    },
+                    onOpenAddSkillRepoDialog = {
+                        isAddSkillRepoDialogOpen = true
+                    },
+                    onRunSkillsAction = { sub ->
+                        spawnSkillsPtySession(sub)
                     },
                     onLaunchSafeCommand = dispatchCommandToPty,
                     onNewContext = { title, agentType, summary ->
@@ -1316,10 +1396,12 @@ private fun WorkstationRoot(
             isZenMode = isZenMode,
             onDismiss = { isCommandPaletteOpen = false },
             onExecuteShellCommand = { cmd ->
-                if (cmd == "workstation install-ssh") {
-                    spawnInstallOpenSshSession()
-                } else {
-                    dispatchCommandToPty(cmd)
+                when (cmd) {
+                    "workstation install-ssh" -> spawnInstallOpenSshSession()
+                    "workstation skills update" -> spawnSkillsPtySession("update")
+                    "workstation skills diff" -> spawnSkillsPtySession("diff")
+                    "workstation skills push" -> spawnSkillsPtySession("push")
+                    else -> dispatchCommandToPty(cmd)
                 }
                 isCommandPaletteOpen = false
             },
@@ -1550,6 +1632,22 @@ private fun WorkstationRoot(
                             notify(err.message ?: "Error al eliminar dispositivo", showSnackbar = true)
                         }
                 }
+            },
+        )
+    }
+
+    if (isAddSkillRepoDialogOpen) {
+        AddSkillRepoDialog(
+            isRootGitRepo = skillsState.isRootGitRepo,
+            onDismiss = { isAddSkillRepoDialogOpen = false },
+            onCloneSubRepo = { gitUrl, folderName ->
+                isAddSkillRepoDialogOpen = false
+                val args = if (folderName.isNotBlank()) listOf(gitUrl, folderName) else listOf(gitUrl)
+                spawnSkillsPtySession("add", args)
+            },
+            onConnectRootRepo = { gitUrl ->
+                isAddSkillRepoDialogOpen = false
+                spawnSkillsPtySession("init", listOf(gitUrl))
             },
         )
     }

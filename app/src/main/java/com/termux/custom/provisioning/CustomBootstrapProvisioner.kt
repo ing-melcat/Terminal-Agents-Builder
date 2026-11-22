@@ -11,7 +11,7 @@ object CustomBootstrapProvisioner {
 
     private const val LOG_TAG = "CustomBootstrapProvisioner"
     private const val ASSET_SCRIPT_PATH = "custom/bootstrap-custom.sh"
-    private const val STAMP_VERSION_FILE = ".config/melcat/.bootstrap_provisioned_v10"
+    private const val STAMP_VERSION_FILE = ".config/melcat/.bootstrap_provisioned_v11"
     private val provisioningLock = Any()
 
     private fun hasValidPrefixBinaries(): Boolean {
@@ -113,35 +113,22 @@ object CustomBootstrapProvisioner {
             }
         }
 
-        // Seed core active skills if missing
-        listOf("senior-auditor", "motion-framer", "caveman").forEach { skillName ->
-            val dir = File(geminiSkillsDir, skillName)
-            dir.mkdirs()
-            val skillMd = File(dir, "SKILL.md")
-            if (!skillMd.exists()) {
-                skillMd.writeText(
-                    """
-                    ---
-                    name: $skillName
-                    description: Active workstation skill ($skillName) for arm64-v8a native CLI agents
-                    ---
-                    # $skillName
-                    Auto-provisioned by Terminal Agents Builder.
-                    """.trimIndent() + "\n"
-                )
-            }
-        }
-
-        // Extract and run bootstrap-custom.sh with explicit Termux environment and drained output
+        // Extract and run bootstrap-custom.sh (single source of truth for rich SKILL.md seeds & CLI scripts)
         val customDir = File(prefixDir, "etc/melcat")
         customDir.mkdirs()
         val scriptFile = File(customDir, "bootstrap-custom.sh")
+        val scriptTmp = File(customDir, "bootstrap-custom.sh.tmp")
         context.applicationContext.assets.open(ASSET_SCRIPT_PATH).use { input ->
-            scriptFile.outputStream().use { output ->
+            scriptTmp.outputStream().use { output ->
                 input.copyTo(output)
             }
         }
-        runCatching { Os.chmod(scriptFile.absolutePath, 448) } // 0700
+        runCatching { Os.chmod(scriptTmp.absolutePath, 448) } // 0700
+        if (!scriptTmp.renameTo(scriptFile)) {
+            scriptTmp.copyTo(scriptFile, overwrite = true)
+            scriptTmp.delete()
+            runCatching { Os.chmod(scriptFile.absolutePath, 448) }
+        }
 
         val shBinary = File(prefixDir, "bin/sh")
         val tmpDir = File(prefixDir, "tmp").apply { mkdirs() }
@@ -156,13 +143,43 @@ object CustomBootstrapProvisioner {
         }
 
         val process = builder.start()
-        val output = runCatching {
-            process.inputStream.bufferedReader().use { it.readText() }
-        }.getOrDefault("")
-        val completed = process.waitFor(15, TimeUnit.SECONDS)
+        val outputBuffer = StringBuilder()
+        val readerThread = Thread(
+            {
+                runCatching {
+                    process.inputStream.bufferedReader().use { reader ->
+                        val chunk = CharArray(512)
+                        while (true) {
+                            val n = reader.read(chunk)
+                            if (n < 0) break
+                            synchronized(outputBuffer) {
+                                if (outputBuffer.length < 4096) {
+                                    outputBuffer.append(chunk, 0, n.coerceAtMost(4096 - outputBuffer.length))
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "BootstrapStdoutDrainer",
+        ).apply {
+            isDaemon = true
+            start()
+        }
+
+        val completed = try {
+            runCatching { process.outputStream.close() }
+            process.waitFor(15, TimeUnit.SECONDS)
+        } finally {
+            if (process.isAlive) {
+                process.destroyForcibly()
+            }
+            runCatching { process.inputStream.close() }
+            runCatching { readerThread.join(500) }
+        }
         if (!completed) {
-            process.destroyForcibly()
-            Logger.logError(LOG_TAG, "bootstrap-custom.sh timed out: $output")
+            val partial = synchronized(outputBuffer) { outputBuffer.toString() }
+            Logger.logError(LOG_TAG, "bootstrap-custom.sh timed out: $partial")
             return false
         }
         val exitCode = process.exitValue()

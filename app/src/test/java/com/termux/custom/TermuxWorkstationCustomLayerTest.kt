@@ -641,5 +641,112 @@ class TermuxWorkstationCustomLayerTest {
             tempRoot.deleteRecursively()
         }
     }
+
+    @Test
+    fun `SkillsRepoManager validates Git URLs and names strictly, inspects Git skill repos, and builds static zero-interpolation PTY execve`() = runTest(testDispatcher) {
+        // 1. Strict URL allowlist blocks option injection, ext::, file://, plaintext http://, embedded passwords, dash hosts/paths, pathless URLs, traversal, and whitespace
+        assertTrue(com.termux.custom.skills.SkillsRepoManager.validateGitUrl("-u./evil").isFailure)
+        assertTrue(com.termux.custom.skills.SkillsRepoManager.validateGitUrl("ext::sh -c id").isFailure)
+        assertTrue(com.termux.custom.skills.SkillsRepoManager.validateGitUrl("file:///etc/passwd").isFailure)
+        assertTrue(com.termux.custom.skills.SkillsRepoManager.validateGitUrl("http://github.com/a/b.git").isFailure)
+        assertTrue(com.termux.custom.skills.SkillsRepoManager.validateGitUrl("https://user:secret@github.com/a/b.git").isFailure)
+        assertTrue(com.termux.custom.skills.SkillsRepoManager.validateGitUrl("https://github.com").isFailure)
+        assertTrue(com.termux.custom.skills.SkillsRepoManager.validateGitUrl("git@-oProxyCommand:a/b").isFailure)
+        assertTrue(com.termux.custom.skills.SkillsRepoManager.validateGitUrl("git@github.com:-foo").isFailure)
+        assertTrue(com.termux.custom.skills.SkillsRepoManager.validateGitUrl("ssh://-F/etc/hosts/repo").isFailure)
+        assertTrue(com.termux.custom.skills.SkillsRepoManager.validateGitUrl("https://github.com/a/b;rm -rf /").isFailure)
+        assertTrue(com.termux.custom.skills.SkillsRepoManager.validateGitUrl("https://github.com/a/b\nwhoami").isFailure)
+        assertTrue(com.termux.custom.skills.SkillsRepoManager.validateGitUrl("https://github.com/a/../b").isFailure)
+        assertTrue(com.termux.custom.skills.SkillsRepoManager.validateGitUrl("https://github.com/ing-melcat/skills.git").isSuccess)
+        assertTrue(com.termux.custom.skills.SkillsRepoManager.validateGitUrl("git@github.com:ing-melcat/skills.git").isSuccess)
+        assertTrue(com.termux.custom.skills.SkillsRepoManager.validateGitUrl("ssh://git@github.com/ing-melcat/skills.git").isSuccess)
+
+        // 2. Strict folder name allowlist blocks path traversal, leading dash, slashes, and spaces
+        assertTrue(com.termux.custom.skills.SkillsRepoManager.validateSkillName("../escape").isFailure)
+        assertTrue(com.termux.custom.skills.SkillsRepoManager.validateSkillName("-bad").isFailure)
+        assertTrue(com.termux.custom.skills.SkillsRepoManager.validateSkillName("a/b").isFailure)
+        assertTrue(com.termux.custom.skills.SkillsRepoManager.validateSkillName("has space").isFailure)
+        assertEquals("my-skills_v1.2", com.termux.custom.skills.SkillsRepoManager.validateSkillName("my-skills_v1.2").getOrThrow())
+
+        // 3. Inspect local skills + sub-repo git + root git repo
+        val tempRoot = java.nio.file.Files.createTempDirectory("melcat-skills-test").toFile()
+        try {
+            val prefixDir = java.io.File(tempRoot, "usr").apply { mkdirs() }
+            val homeDir = java.io.File(tempRoot, "home").apply { mkdirs() }
+            val skillsDir = java.io.File(homeDir, ".gemini/config/skills").apply { mkdirs() }
+
+            // Root .git metadata (include decoy urlPrefix key to ensure exact 'url' key matching)
+            val rootGit = java.io.File(skillsDir, ".git").apply { mkdirs() }
+            java.io.File(rootGit, "HEAD").writeText("ref: refs/heads/main\n")
+            java.io.File(rootGit, "config").writeText(
+                """
+                [core]
+                    bare = false
+                [remote "origin"]
+                    urlPrefix = https://wrong.example/decoy.git
+                    url = https://github.com/ing-melcat/my-rur-skills.git
+                """.trimIndent()
+            )
+
+            // Local non-git skill
+            val localSkill = java.io.File(skillsDir, "senior-auditor").apply { mkdirs() }
+            java.io.File(localSkill, "SKILL.md").writeText("# Senior Auditor\n")
+
+            // Sub-repo git skill
+            val gitSkill = java.io.File(skillsDir, "robotics-skills").apply { mkdirs() }
+            java.io.File(gitSkill, "SKILL.md").writeText("# Robotics Skills\n")
+            val subGit = java.io.File(gitSkill, ".git").apply { mkdirs() }
+            java.io.File(subGit, "HEAD").writeText("ref: refs/heads/dev\n")
+            java.io.File(subGit, "config").writeText(
+                """
+                [remote "origin"]
+                    url = git@github.com:ing-melcat/robotics-skills.git
+                """.trimIndent()
+            )
+
+            val manager = com.termux.custom.skills.SkillsRepoManager(
+                prefixDir = prefixDir,
+                homeDir = homeDir,
+                ioDispatcher = testDispatcher,
+            )
+
+            val state = manager.inspectSkills()
+            assertTrue(state.isRootGitRepo)
+            assertEquals("main", state.rootBranch)
+            assertEquals("https://github.com/ing-melcat/my-rur-skills.git", state.rootRemoteUrl)
+            assertEquals(2, state.totalCount)
+            assertEquals(2, state.gitReposCount) // root + robotics-skills
+
+            val robotics = state.skills.first { it.name == "robotics-skills" }
+            assertTrue(robotics.hasSkillMd)
+            assertTrue(robotics.isGitRepo)
+            assertEquals("dev", robotics.branch)
+            assertEquals("git@github.com:ing-melcat/robotics-skills.git", robotics.remoteUrl)
+
+            val auditor = state.skills.first { it.name == "senior-auditor" }
+            assertTrue(auditor.hasSkillMd)
+            assertFalse(auditor.isGitRepo)
+
+            // 4. Static zero-interpolation PTY execve argv
+            val repoUrl = "https://github.com/ing-melcat/skills.git"
+            val (shBin, argv) = manager.buildSkillsPtyExec("add", listOf(repoUrl, "my-skills"))
+            assertTrue(shBin.endsWith("/bin/sh"))
+            assertEquals("-c", argv[0])
+            assertFalse("User URL must never be interpolated into sh script body", argv[1].contains(repoUrl))
+            assertFalse("Prefix path must never be interpolated into sh script body", argv[1].contains(tempRoot.name))
+            assertEquals("rur-skills", argv[2])
+            assertEquals("skills", argv[7])
+            assertEquals("add", argv[8])
+            assertEquals(repoUrl, argv[9])
+            assertEquals("my-skills", argv[10])
+
+            // Reject invalid subcommand
+            val badSub = runCatching { manager.buildSkillsPtyExec("rm -rf /") }
+            assertTrue(badSub.isFailure)
+        } finally {
+            tempRoot.deleteRecursively()
+        }
+    }
 }
+
 

@@ -58,14 +58,18 @@ android {
         applicationId "com.termux"
         minSdkVersion project.properties.minSdkVersion.toInteger()
         targetSdkVersion project.properties.targetSdkVersion.toInteger()
-        versionCode (System.getenv("WORKSTATION_VERSION_CODE")?.toInteger() ?: 1001)
-        versionName "1.0.1"
+        versionCode (System.getenv("WORKSTATION_VERSION_CODE")?.toInteger() ?: 10100)
+        versionName "1.1.0"
 
         if (appVersionName) versionName = appVersionName
         validateVersionName(versionName)
 
         buildConfigField "String", "TERMUX_PACKAGE_VARIANT", "\"" + project.ext.packageVariant + "\"" // Used by TermuxApplication class
-        buildConfigField "String", "WORKSTATION_RELEASE_TAG", "\"" + (System.getenv("WORKSTATION_RELEASE_TAG") ?: "v1.0.1") + "\""
+        def resolvedReleaseTag = System.getenv("WORKSTATION_RELEASE_TAG") ?: "v1.1"
+        if (!(resolvedReleaseTag ==~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]?)(\.(0|[1-9][0-9]?))?(-[A-Za-z0-9.]+)?$/)) {
+            throw new GradleException("Invalid WORKSTATION_RELEASE_TAG: " + resolvedReleaseTag)
+        }
+        buildConfigField "String", "WORKSTATION_RELEASE_TAG", "\"${resolvedReleaseTag}\""
 
         manifestPlaceholders.TERMUX_PACKAGE_NAME = "com.termux"
         manifestPlaceholders.TERMUX_APP_NAME = "Termux"
@@ -102,7 +106,15 @@ android {
     def releaseStorePass = System.getenv("RUR_KEYSTORE_PASSWORD") ?: keystoreProps.getProperty("storePassword", "")
     def releaseKeyAlias = System.getenv("RUR_KEY_ALIAS") ?: keystoreProps.getProperty("keyAlias", "")
     def releaseKeyPass = System.getenv("RUR_KEY_PASSWORD") ?: keystoreProps.getProperty("keyPassword", "")
-    def hasReleaseKeystore = releaseStorePath && file(releaseStorePath).isFile() &&
+    def resolveKeystoreFile = { String rawPath ->
+        if (!rawPath) return null
+        def f = new File(rawPath)
+        if (f.isAbsolute()) return f
+        def fromRoot = rootProject.file(rawPath)
+        return fromRoot.isFile() ? fromRoot : file(rawPath)
+    }
+    def releaseStoreFile = resolveKeystoreFile(releaseStorePath)
+    def hasReleaseKeystore = releaseStoreFile != null && releaseStoreFile.isFile() &&
         releaseStorePass && releaseKeyAlias && releaseKeyPass
     if (System.getenv("RUR_REQUIRE_RELEASE_SIGNING") == "1" && !hasReleaseKeystore) {
         throw new GradleException("RUR_REQUIRE_RELEASE_SIGNING=1 is set, but RUR_KEYSTORE_PATH / RUR_KEYSTORE_PASSWORD / RUR_KEY_ALIAS / RUR_KEY_PASSWORD are missing or keystore file was not found.")
@@ -117,7 +129,7 @@ android {
         }
         if (hasReleaseKeystore) {
             release {
-                storeFile file(releaseStorePath)
+                storeFile releaseStoreFile
                 storePassword releaseStorePass
                 keyAlias releaseKeyAlias
                 keyPassword releaseKeyPass

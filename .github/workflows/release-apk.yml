@@ -54,6 +54,20 @@ jobs:
             fi
           fi
 
+          # Strictly validate TAG & optional INPUT_VCODE before arithmetic or GITHUB_OUTPUT (blocks expression/output injection)
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]?)(\.(0|[1-9][0-9]?))?(-[A-Za-z0-9.]+)?$ ]]; then
+            echo "::error::Invalid release tag format: $TAG"
+            exit 1
+          fi
+          if [ -n "${INPUT_VCODE}" ] && [[ ! "${INPUT_VCODE}" =~ ^[1-9][0-9]{0,8}$ ]]; then
+            echo "::error::Invalid version_code: ${INPUT_VCODE}"
+            exit 1
+          fi
+          if [ "$PRERELEASE" != "true" ] && [ "$PRERELEASE" != "false" ]; then
+            echo "::error::Invalid prerelease flag: $PRERELEASE"
+            exit 1
+          fi
+
           # Normalize SemVer 2.0.0 versionName for Termux validateVersionName (major.minor.patch)
           CLEAN="${TAG#v}"
           IFS='.' read -r MAJOR MINOR PATCH _ <<< "${CLEAN%%-*}"
@@ -89,10 +103,17 @@ jobs:
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Verify Layer 0 invariants & POSIX shell syntax
+      - name: Verify Layer 0 invariants & POSIX shell syntax (incl. embedded heredocs)
         run: |
           set -euo pipefail
           sh -n app/src/main/assets/custom/bootstrap-custom.sh
+          awk '/^cat > "\$PREFIX\/bin\/workstation\.tmp\.\$\$" <<'\''EOF'\''$/{flag=1;next}/^EOF$/{if(flag){exit}}flag' app/src/main/assets/custom/bootstrap-custom.sh > "${RUNNER_TEMP}/workstation.sh"
+          awk '/^cat > "\$PREFIX\/bin\/melcat-gc\.tmp\.\$\$" <<'\''EOF'\''$/{flag=1;next}/^EOF$/{if(flag){exit}}flag' app/src/main/assets/custom/bootstrap-custom.sh > "${RUNNER_TEMP}/melcat-gc.sh"
+          test -s "${RUNNER_TEMP}/workstation.sh"
+          test -s "${RUNNER_TEMP}/melcat-gc.sh"
+          sh -n "${RUNNER_TEMP}/workstation.sh"
+          sh -n "${RUNNER_TEMP}/melcat-gc.sh"
+          rm -f "${RUNNER_TEMP}/workstation.sh" "${RUNNER_TEMP}/melcat-gc.sh"
           grep -q '^targetSdkVersion=28$' gradle.properties
           grep -q 'applicationId "com.termux"' app/build.gradle
           test -f terminal-emulator/src/main/jni/termux.c
@@ -129,7 +150,7 @@ jobs:
           TERMUX_APP_VERSION_NAME: ${{ steps.meta.outputs.version_name }}
         run: ./gradlew assembleRelease --no-daemon
 
-      - name: Verify APK signature, cert fingerprint & SHA-256 checksums
+      - name: Verify APK signature, cert fingerprint, Layer 0 badging & SHA-256 checksums
         id: verify
         shell: bash
         run: |
@@ -138,12 +159,13 @@ jobs:
           OUT_DIR="app/build/outputs/apk/release"
           ARM64_APK="${OUT_DIR}/termux-app_apt-android-7-release_arm64-v8a.apk"
           UNIV_APK="${OUT_DIR}/termux-app_apt-android-7-release_universal.apk"
+          CERT_FILE="${RUNNER_TEMP}/cert_info.txt"
 
           test -f "$ARM64_APK"
-          "$BT/apksigner" verify --verbose --print-certs "$ARM64_APK" > /tmp/cert_info.txt
-          cat /tmp/cert_info.txt
+          "$BT/apksigner" verify --verbose --print-certs "$ARM64_APK" > "$CERT_FILE"
+          cat "$CERT_FILE"
 
-          CERT_SHA256="$(grep -m1 'Signer #1 certificate SHA-256 digest:' /tmp/cert_info.txt | awk '{print $NF}')"
+          CERT_SHA256="$(grep -m1 'Signer #1 certificate SHA-256 digest:' "$CERT_FILE" | awk '{print tolower($NF)}')"
           if [ -z "$CERT_SHA256" ]; then
             echo "::error::Could not extract signing certificate SHA-256"
             exit 1
@@ -153,12 +175,20 @@ jobs:
             exit 1
           fi
 
-          "$BT/aapt2" dump badging "$ARM64_APK" | grep -E '^(package:|targetSdkVersion:)'
+          BADGING="$("$BT/aapt2" dump badging "$ARM64_APK")"
+          printf '%s\n' "$BADGING" | grep -E '^(package:|targetSdkVersion:)'
+          printf '%s\n' "$BADGING" | grep -q "package: name='com.termux'"
+          printf '%s\n' "$BADGING" | grep -q "targetSdkVersion:'28'"
 
           ARM64_SHA="$(sha256sum "$ARM64_APK" | awk '{print $1}')"
           printf '%s  termux-app_apt-android-7-release_arm64-v8a.apk\n' "$ARM64_SHA" > "${ARM64_APK}.sha256"
 
           if [ -f "$UNIV_APK" ]; then
+            UNIV_CERT="$("$BT/apksigner" verify --verbose --print-certs "$UNIV_APK" | grep -m1 'Signer #1 certificate SHA-256 digest:' | awk '{print tolower($NF)}')"
+            if [ "$UNIV_CERT" != "$CERT_SHA256" ]; then
+              echo "::error::Universal APK signature mismatch (${UNIV_CERT} != ${CERT_SHA256})"
+              exit 1
+            fi
             UNIV_SHA="$(sha256sum "$UNIV_APK" | awk '{print $1}')"
             printf '%s  termux-app_apt-android-7-release_universal.apk\n' "$UNIV_SHA" > "${UNIV_APK}.sha256"
           fi
@@ -188,20 +218,16 @@ jobs:
             ASSETS+=("$UNIV_APK" "$UNIV_SUM")
           fi
 
-          NOTES="## ${TAG} (Release Oficial Firmado — RUR Edition)
-
-          - **Versión Android:** \`${VNAME}\` (\`versionCode ${VCODE}\`) · \`arm64-v8a\` + \`universal\`
-          - **APK \`arm64-v8a\` SHA-256:** \`${ARM64_SHA}\`
-          - **Certificado oficial RUR (SHA-256):** \`${CERT_SHA}\`
-
-          > Actualiza instalando el APK directamente **encima** (o desde \`Shield -> Auto-Updates\`) sin desinstalar para conservar tus agentes, paquetes, llaves SSH y bóvedas \`0600\`.
-          > *(Nota: si vienes de una build debug anterior firmada con \`testkey_untrusted.jks\`, haz backup con \`melcat-gc --snapshot\` y desinstala 1 única vez antes de pasar al canal firmado oficial RUR.)*"
+          NOTES="$(printf '## %s (Release Oficial Firmado — RUR Edition)\n\n- **Versión Android:** `%s` (`versionCode %s`) · `arm64-v8a` + `universal`\n- **APK `arm64-v8a` SHA-256:** `%s`\n- **Certificado oficial RUR (SHA-256):** `%s`\n\n> Actualiza instalando el APK directamente **encima** (o desde `Shield -> Auto-Updates`) sin desinstalar para conservar tus agentes, paquetes, llaves SSH, skills y bóvedas `0600`.\n> *(Nota: si vienes de una build debug anterior firmada con `testkey_untrusted.jks`, haz backup con `melcat-gc --snapshot` y desinstala 1 única vez antes de pasar al canal firmado oficial RUR.)*\n' "$TAG" "$VNAME" "$VCODE" "$ARM64_SHA" "$CERT_SHA")"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "${ASSETS[@]}" --clobber
             gh release edit "$TAG" --title "$TAG" --notes "$NOTES"
           else
             FLAGS=(--title "$TAG" --notes "$NOTES")
+            if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+              FLAGS+=(--target "$GITHUB_SHA")
+            fi
             if [ "$PRERELEASE" = "true" ]; then
               FLAGS+=(--prerelease)
             else
