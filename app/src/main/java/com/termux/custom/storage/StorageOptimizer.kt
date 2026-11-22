@@ -97,10 +97,12 @@ class StorageOptimizer(
 
             if (melcatGcBinary.canExecute()) {
                 runCatching {
-                    val proc = ProcessBuilder(melcatGcBinary.absolutePath)
+                    val pb = ProcessBuilder(melcatGcBinary.absolutePath)
                         .directory(homeDir.takeIf { it.exists() })
                         .redirectErrorStream(true)
-                        .start()
+                    pb.environment()["PATH"] = "${prefixDir.absolutePath}/bin:/system/bin:/vendor/bin"
+                    pb.environment()["HOME"] = homeDir.absolutePath
+                    val proc = pb.start()
                     proc.inputStream.bufferedReader().use { it.readText() }
                     if (!proc.waitFor(20, TimeUnit.SECONDS)) {
                         proc.destroyForcibly()
@@ -140,9 +142,10 @@ class StorageOptimizer(
             }
 
             val exitCode = runCatching {
-                val proc = ProcessBuilder(shBin, "-c", cmd)
-                    .redirectErrorStream(true)
-                    .start()
+                val pb = ProcessBuilder(shBin, "-c", cmd).redirectErrorStream(true)
+                pb.environment()["PATH"] = "${prefixDir.absolutePath}/bin:/system/bin:/vendor/bin"
+                pb.environment()["HOME"] = homeDir.absolutePath
+                val proc = pb.start()
                 proc.inputStream.bufferedReader().use { it.readText() }
                 if (!proc.waitFor(45, TimeUnit.SECONDS)) {
                     proc.destroyForcibly()

@@ -78,14 +78,20 @@ class ProcessGuardianService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_TOGGLE_LOCKS -> {
+                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 if (wakeLock?.isHeld == true) {
                     releaseLocks()
+                    prefs.edit().putBoolean(KEY_USER_RELEASED_LOCKS, true).apply()
                 } else {
                     acquireLocks()
+                    prefs.edit().putBoolean(KEY_USER_RELEASED_LOCKS, false).apply()
                 }
             }
             else -> {
-                acquireLocks()
+                // Respect an explicit "Release Locks" from the user across activity relaunches.
+                val userReleased = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .getBoolean(KEY_USER_RELEASED_LOCKS, false)
+                if (!userReleased) acquireLocks()
             }
         }
 
@@ -216,6 +222,8 @@ class ProcessGuardianService : Service() {
         private const val CHANNEL_ID = "termux_custom_process_guardian"
         private const val NOTIFICATION_ID = 4201
         const val ACTION_START = "com.termux.custom.guardian.START"
+        private const val PREFS_NAME = "melcat_guardian"
+        private const val KEY_USER_RELEASED_LOCKS = "user_released_locks"
         const val ACTION_STOP = "com.termux.custom.guardian.STOP"
         const val ACTION_TOGGLE_LOCKS = "com.termux.custom.guardian.TOGGLE_LOCKS"
 

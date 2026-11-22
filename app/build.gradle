@@ -65,7 +65,7 @@ android {
         validateVersionName(versionName)
 
         buildConfigField "String", "TERMUX_PACKAGE_VARIANT", "\"" + project.ext.packageVariant + "\"" // Used by TermuxApplication class
-        buildConfigField "String", "WORKSTATION_RELEASE_TAG", "\"" + (System.getenv("WORKSTATION_RELEASE_TAG") ?: "v0.118.0-melcat.3") + "\""
+        buildConfigField "String", "WORKSTATION_RELEASE_TAG", "\"" + (System.getenv("WORKSTATION_RELEASE_TAG") ?: "v0.118.0-melcat.4") + "\""
 
         manifestPlaceholders.TERMUX_PACKAGE_NAME = "com.termux"
         manifestPlaceholders.TERMUX_APP_NAME = "Termux"

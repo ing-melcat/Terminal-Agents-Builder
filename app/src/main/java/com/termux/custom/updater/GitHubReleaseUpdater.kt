@@ -59,15 +59,25 @@ class GitHubReleaseUpdater(
     private val _state = MutableStateFlow<UpdateState>(UpdateState.Idle)
     val state: StateFlow<UpdateState> = _state.asStateFlow()
 
+    private val _hasPrivateRepoToken = MutableStateFlow(false)
+    val hasPrivateRepoTokenFlow: StateFlow<Boolean> = _hasPrivateRepoToken.asStateFlow()
+
     val installedTag: String
         get() = currentTag
 
     fun hasPrivateRepoToken(): Boolean = tokenFile.isFile && tokenFile.length() > 0L
 
+    suspend fun refreshTokenState(): Boolean = withContext(ioDispatcher) {
+        val present = hasPrivateRepoToken()
+        _hasPrivateRepoToken.value = present
+        present
+    }
+
     suspend fun savePrivateRepoToken(rawToken: String) = withContext(ioDispatcher) {
         val clean = rawToken.trim()
         if (clean.isEmpty()) {
             tokenFile.delete()
+            _hasPrivateRepoToken.value = false
             return@withContext
         }
         tokenFile.writeText(clean + "\n")
@@ -76,6 +86,7 @@ class GitHubReleaseUpdater(
         tokenFile.setWritable(false, false)
         tokenFile.setReadable(true, true)
         tokenFile.setWritable(true, true)
+        _hasPrivateRepoToken.value = true
     }
 
     private fun readPrivateRepoToken(): String? =
@@ -124,6 +135,8 @@ class GitHubReleaseUpdater(
     }
 
     suspend fun downloadAndVerifyUpdate(release: ReleaseInfo) {
+        // Guard against rapid double taps starting concurrent writers on the same .part file.
+        if (_state.value is UpdateState.Downloading) return
         _state.value = UpdateState.Downloading(release, 0)
         val token = withContext(ioDispatcher) { readPrivateRepoToken() }
 
@@ -227,15 +240,20 @@ class GitHubReleaseUpdater(
             return false
         }
 
-        val authority = "${context.packageName}.custom.updater.fileprovider"
-        val contentUri = FileProvider.getUriForFile(context, authority, apkFile)
-        val installIntent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(contentUri, "application/vnd.android.package-archive")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return runCatching {
+            val authority = "${context.packageName}.custom.updater.fileprovider"
+            val contentUri = FileProvider.getUriForFile(context, authority, apkFile)
+            val installIntent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(contentUri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(installIntent)
+            true
+        }.getOrElse { err ->
+            _state.value = UpdateState.Error("Installer failed: ${err.message ?: err.javaClass.simpleName}")
+            false
         }
-        context.startActivity(installIntent)
-        return true
     }
 
     fun openReleasesInBrowser(context: Context, url: String = RELEASES_WEB_URL) {

@@ -38,12 +38,11 @@ class AntigravityTokenWarden(
         get() = File(TermuxConstants.TERMUX_HOME_DIR_PATH, ".gemini/$TOKEN_FILE_NAME")
 
     suspend fun inspectTokenState(): OAuthTokenState = withContext(ioDispatcher) {
-        val source = when {
-            privateTokenFile.isFile && privateTokenFile.length() > 0 -> privateTokenFile
-            termuxHomeTokenFile.isFile && termuxHomeTokenFile.length() > 0 -> termuxHomeTokenFile
-            geminiHomeTokenFile.isFile && geminiHomeTokenFile.length() > 0 -> geminiHomeTokenFile
-            else -> null
-        }
+        // Newest non-empty copy wins, so a token rotated from the CLI (`agy login`) is never
+        // overwritten by a stale app-private copy. Ties prefer the app-private vault.
+        val source = listOf(privateTokenFile, termuxHomeTokenFile, geminiHomeTokenFile)
+            .filter { it.isFile && it.length() > 0 }
+            .maxWithOrNull(compareBy<File> { it.lastModified() }.thenBy { if (it == privateTokenFile) 1 else 0 })
 
         if (source == null) {
             return@withContext OAuthTokenState(
@@ -57,7 +56,8 @@ class AntigravityTokenWarden(
         }
 
         val rawToken = source.readText().trim()
-        if (source != privateTokenFile && rawToken.isNotEmpty()) {
+        val privateCurrent = if (privateTokenFile.isFile) privateTokenFile.readText().trim() else null
+        if (source != privateTokenFile && rawToken.isNotEmpty() && privateCurrent != rawToken) {
             writeAndLockFileAtomic(privateTokenFile, rawToken)
         } else {
             enforceMode0600(privateTokenFile)
@@ -104,7 +104,9 @@ class AntigravityTokenWarden(
         if (homeDir.exists() || homeDir.mkdirs()) {
             listOf(termuxHomeTokenFile, geminiHomeTokenFile).forEach { target ->
                 runCatching {
-                    writeAndLockFileAtomic(target, token)
+                    // Skip redundant rewrites on every resume when the CLI copy is already current.
+                    val current = if (target.isFile) target.readText().trim() else null
+                    if (current == token) enforceMode0600(target) else writeAndLockFileAtomic(target, token)
                     synced.add(target.absolutePath)
                 }
             }

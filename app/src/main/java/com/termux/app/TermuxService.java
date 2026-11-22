@@ -746,10 +746,12 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
      * {@link TermuxService}, otherwise {@link TermuxTerminalSessionServiceClient}.
      */
     public synchronized TermuxTerminalSessionClientBase getTermuxTerminalSessionClient() {
-        if (mTermuxTerminalSessionActivityClient != null)
-            return mTermuxTerminalSessionActivityClient;
-        else if (mCustomTerminalSessionClient != null)
+        // Terminal Agents Builder: the custom Workstation client is only non-null while
+        // WorkstationActivity is started, so it wins over a stopped-but-alive TermuxActivity.
+        if (mCustomTerminalSessionClient != null)
             return mCustomTerminalSessionClient;
+        else if (mTermuxTerminalSessionActivityClient != null)
+            return mTermuxTerminalSessionActivityClient;
         else
             return mTermuxTerminalSessionServiceClient;
     }

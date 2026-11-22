@@ -176,4 +176,57 @@ class TermuxWorkstationCustomLayerTest {
         assertTrue(parsed.apkDownloadUrl.contains("v0.118.0-melcat.4"))
         assertTrue(parsed.sha256Url!!.endsWith(".sha256"))
     }
+
+    @Test
+    fun tutorialProgressStorePersistsValidStepsAndAutoOffer() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val store = com.termux.custom.ui.TutorialProgressStore
+        store.reset(context)
+
+        assertTrue(store.shouldAutoOffer(context))
+        assertEquals(0f, store.computeProgressFraction(emptySet()), 0.0001f)
+
+        val filtered = store.filterValidIds(setOf("arm64_engine_setup", "bogus_step_id"))
+        assertEquals(setOf("arm64_engine_setup"), filtered)
+
+        val afterFirst = store.setStepCompleted(context, com.termux.custom.ui.TutorialStep.ARM64_ENGINE_SETUP, true)
+        assertEquals(setOf("arm64_engine_setup"), afterFirst)
+        assertEquals(1f / com.termux.custom.ui.TutorialStep.entries.size, store.computeProgressFraction(afterFirst), 0.0001f)
+
+        store.setAutoOffered(context, true)
+        assertFalse(store.shouldAutoOffer(context))
+
+        val reloaded = store.loadCompletedIds(context)
+        assertEquals(setOf("arm64_engine_setup"), reloaded)
+
+        val afterUncheck = store.setStepCompleted(context, com.termux.custom.ui.TutorialStep.ARM64_ENGINE_SETUP, false)
+        assertTrue(afterUncheck.isEmpty())
+    }
+
+    @Test
+    fun shieldScoreAlignsWithFiveChecklistItems() {
+        val baseGuardian = com.termux.custom.guardian.GuardianStatus(
+            isServiceRunning = true,
+            wakeLockHeld = true,
+            wifiLockHeld = true,
+            batteryOptimizationIgnored = true,
+            isHyperOsOrMiui = true,
+            maxPhantomProcesses = "2147483647",
+            adbPhantomFixCommand = "adb shell ...",
+        )
+        val missingToken = com.termux.custom.security.OAuthTokenState(
+            isPresent = false,
+            maskedPreview = "Not configured",
+            fingerprintSha256 = "none",
+            posixModeOctal = "----",
+            storagePath = "",
+            syncedCliTargets = emptyList(),
+        )
+        // Missing OAuth token must NOT reach 100% even if phantomShielded is true
+        assertEquals(80, com.termux.custom.ui.computeShieldScore(true, baseGuardian, missingToken))
+
+        val activeToken = missingToken.copy(isPresent = true, posixModeOctal = "0600")
+        assertEquals(100, com.termux.custom.ui.computeShieldScore(true, baseGuardian, activeToken))
+    }
 }
+

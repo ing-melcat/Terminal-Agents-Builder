@@ -11,7 +11,7 @@ object CustomBootstrapProvisioner {
 
     private const val LOG_TAG = "CustomBootstrapProvisioner"
     private const val ASSET_SCRIPT_PATH = "custom/bootstrap-custom.sh"
-    private const val STAMP_VERSION_FILE = ".config/melcat/.bootstrap_provisioned_v3"
+    private const val STAMP_VERSION_FILE = ".config/melcat/.bootstrap_provisioned_v4"
     private val provisioningLock = Any()
 
     /**

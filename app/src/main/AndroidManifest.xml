@@ -57,7 +57,7 @@
             android:label="Terminal Agents"
             android:launchMode="singleTask"
             android:resizeableActivity="true"
-            android:theme="@style/Theme.TermuxApp.DayNight.NoActionBar"
+            android:theme="@style/Theme.Workstation.NoActionBar"
             android:windowSoftInputMode="adjustResize|stateHidden"
             tools:targetApi="n">
             <intent-filter>
