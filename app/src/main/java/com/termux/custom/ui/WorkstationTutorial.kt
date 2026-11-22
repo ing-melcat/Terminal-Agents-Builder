@@ -74,14 +74,14 @@ enum class TutorialStep(
 ) {
     ARM64_ENGINE_SETUP(
         id = "arm64_engine_setup",
-        title = "1. Instalar Antigravity CLI (agy) + toolchain",
-        body = "Ejecuta `workstation setup` para instalar glibc, certificados TLS, DNS, el binario oficial de Google Antigravity CLI (`agy` parcheado VA39 para Termux arm64) y git/zstd/zsh/tmux/rg/jq. Luego `workstation doctor` verifica todo en [ok].",
+        title = "1. Instalar Antigravity (agy) + toolchain",
+        body = "Ejecuta `workstation setup` para instalar glibc, TLS, DNS, Google Antigravity CLI (`agy` VA39) y git/zstd/zsh/tmux/rg/jq. En la pestaña Agents también puedes instalar OpenCode v2 nativo en 1 toque para modelos de código gratis o de pago.",
         actionLabel = "workstation setup && workstation doctor",
     ),
     ACTIVATE_SKILLS(
         id = "activate_skills",
         title = "2. Activar skills unificadas",
-        body = "Las skills globales viven en ~/.gemini/config/skills y se enlazan a ~/.gemini/antigravity-cli/skills y ~/.claude/skills (senior-auditor, motion-framer, caveman). Ejecuta `workstation skills` para comprobarlas.",
+        body = "Las skills globales viven en ~/.gemini/config/skills y se enlazan a ~/.gemini/antigravity-cli/skills, ~/.config/opencode/skills y ~/.claude/skills (senior-auditor, motion-framer, caveman). Ejecuta `workstation skills` para comprobarlas.",
         actionLabel = "workstation skills",
     ),
     OAUTH_VAULT_0600(
@@ -265,23 +265,10 @@ fun FirstStepsTutorialSheet(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(34.dp)
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(WorkstationColors.AccentCyanWash),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Icon(
-                                    imageVector = WorkstationIcons.TerminalPrompt,
-                                    contentDescription = null,
-                                    tint = WorkstationColors.AccentCyan,
-                                    modifier = Modifier.size(18.dp),
-                                )
-                            }
+                            RurBrandBadge(size = 34.dp)
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "Primeros pasos · Workstation",
+                                    text = "Primeros pasos · RUR Workstation",
                                     fontSize = 15.sp,
                                     fontWeight = FontWeight.SemiBold,
                                     color = WorkstationColors.TextPrimary,

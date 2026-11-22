@@ -38,6 +38,7 @@ data class AgentSessionRecord(
         val cleanId = id.replace(Regex("[^A-Za-z0-9_-]"), "").take(12)
         return when (safeAgent) {
             "agy" -> if (cleanId.isNotEmpty()) "agy --resume $cleanId" else "agy"
+            "opencode" -> "opencode"
             "claude" -> "claude"
             "zellij" -> "zellij"
             else -> "sh"
@@ -45,7 +46,7 @@ data class AgentSessionRecord(
     }
 
     companion object {
-        val ALLOWED_AGENTS = setOf("agy", "claude", "zellij", "sh")
+        val ALLOWED_AGENTS = setOf("agy", "opencode", "claude", "zellij", "sh")
     }
 }
 

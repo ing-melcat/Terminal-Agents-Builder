@@ -37,6 +37,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.shape.CircleShape
+import com.termux.custom.agents.CodingAgentsState
+import com.termux.custom.agents.CodingProvider
 import com.termux.custom.data.AgentSessionRecord
 import com.termux.custom.guardian.GuardianStatus
 import com.termux.custom.security.OAuthTokenState
@@ -46,13 +51,16 @@ import com.termux.custom.updater.UpdateState
 import java.io.File
 
 // ============================================================================================
-// INSPECTOR PANELS (COMMERCIAL BUYER-READY POLISH)
+// INSPECTOR PANELS (RUR AEROSPACE CARBON & GOLD EDITION)
 // ============================================================================================
 @Composable
 internal fun AgentsWorkspacePanel(
     sessions: List<AgentSessionRecord>,
     siteId: String,
     isBusy: Boolean,
+    codingAgentsState: CodingAgentsState,
+    onRefreshAgentsState: () -> Unit,
+    onOpenCodingModelsDialog: () -> Unit,
     onLaunchSafeCommand: (String) -> Unit,
     onNewContext: (title: String, agentType: String, summary: String) -> Unit,
     onExportDeltas: () -> Unit,
@@ -63,163 +71,246 @@ internal fun AgentsWorkspacePanel(
     var showNewWorkspaceDialog by rememberSaveable { mutableStateOf(false) }
     var showImportDeltasDialog by rememberSaveable { mutableStateOf(false) }
 
-    Column(
+    LazyColumn(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        // Quick-Start Agent Launchers (1-tap presets)
-        Surface(
-            shape = RoundedCornerShape(14.dp),
-            color = WorkstationColors.SurfaceElevated,
-            border = BorderStroke(1.dp, WorkstationColors.BorderHairline),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Column(
-                modifier = Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+        // 1. Native Coding Agents Hub (Antigravity CLI + OpenCode v2 Bionic)
+        item(key = "native_coding_agents_hub") {
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = WorkstationColors.SurfaceElevated,
+                border = BorderStroke(1.dp, WorkstationColors.BorderStrong),
+                modifier = Modifier.fillMaxWidth(),
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Text(
-                        text = "Local Workspaces",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = WorkstationColors.TextPrimary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = "Native Coding Agents",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = WorkstationColors.TextPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(
+                            onClick = onRefreshAgentsState,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                        ) {
+                            Text(
+                                text = "Refresh",
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp,
+                                color = WorkstationColors.AccentGold,
+                                maxLines = 1,
+                            )
+                        }
+                    }
+
+                    // Agent 1: Official Google Antigravity CLI (agy)
+                    NativeAgentRow(
+                        name = "Antigravity CLI (agy)",
+                        detail = if (codingAgentsState.agyInstalled) {
+                            "Native arm64 VA39 · Google Sign-In"
+                        } else {
+                            "Not installed · 1-tap arm64 setup"
+                        },
+                        installed = codingAgentsState.agyInstalled,
+                        primaryLabel = if (codingAgentsState.agyInstalled) "Launch" else "Install",
+                        onPrimaryClick = {
+                            onLaunchSafeCommand(
+                                if (codingAgentsState.agyInstalled) "agy" else "workstation setup && workstation doctor"
+                            )
+                        },
+                        secondaryLabel = if (codingAgentsState.agyInstalled) "Update" else null,
+                        onSecondaryClick = { onLaunchSafeCommand("agy update") },
                     )
-                    Text(
-                        text = "P2P · $siteId",
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 10.sp,
-                        color = WorkstationColors.AccentCyan,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+
+                    // Agent 2: Native Bionic OpenCode v2 (Free $0 + Paid Code-Only Models)
+                    val activeModelLabel = codingAgentsState.activePreset?.let {
+                        "${it.displayName} (${it.tier.badge})"
+                    } ?: codingAgentsState.activeOpenCodeModel ?: "Gratis \$0 (/models) · Code-Only"
+
+                    NativeAgentRow(
+                        name = "OpenCode v2 (opencode)",
+                        detail = if (codingAgentsState.opencodeInstalled) {
+                            activeModelLabel
+                        } else {
+                            "Bionic aarch64 · Modelos código gratis y pago"
+                        },
+                        installed = codingAgentsState.opencodeInstalled,
+                        primaryLabel = if (codingAgentsState.opencodeInstalled) "Launch" else "Install",
+                        onPrimaryClick = {
+                            onLaunchSafeCommand(
+                                if (codingAgentsState.opencodeInstalled) "opencode" else "workstation install-opencode"
+                            )
+                        },
+                        secondaryLabel = "Models",
+                        onSecondaryClick = onOpenCodingModelsDialog,
                     )
                 }
+            }
+        }
 
-                Button(
-                    onClick = { showNewWorkspaceDialog = true },
-                    enabled = !isBusy,
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-                    modifier = Modifier.fillMaxWidth(),
+        // 2. Local-First CRDT Workspaces Card
+        item(key = "local_workspaces_controls") {
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = WorkstationColors.SurfaceElevated,
+                border = BorderStroke(1.dp, WorkstationColors.BorderHairline),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text("New Workspace", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = "Local Workspaces",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = WorkstationColors.TextPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(
+                            text = "P2P · $siteId",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp,
+                            color = WorkstationColors.AccentGold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    OutlinedButton(
-                        onClick = onExportDeltas,
+                    Button(
+                        onClick = { showNewWorkspaceDialog = true },
                         enabled = !isBusy,
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
-                        border = BorderStroke(1.dp, WorkstationColors.BorderHairline),
-                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                        modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Text("Export", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("New Workspace", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
-                    OutlinedButton(
-                        onClick = onShareDeltas,
-                        enabled = !isBusy,
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
-                        border = BorderStroke(1.dp, WorkstationColors.BorderHairline),
-                        modifier = Modifier.weight(1f),
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        Text("Share", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                    OutlinedButton(
-                        onClick = { showImportDeltasDialog = true },
-                        enabled = !isBusy,
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
-                        border = BorderStroke(1.dp, WorkstationColors.BorderHairline),
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text("Import", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        OutlinedButton(
+                            onClick = onExportDeltas,
+                            enabled = !isBusy,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                            border = BorderStroke(1.dp, WorkstationColors.BorderHairline),
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text("Export", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        OutlinedButton(
+                            onClick = onShareDeltas,
+                            enabled = !isBusy,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                            border = BorderStroke(1.dp, WorkstationColors.BorderHairline),
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text("Share", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        OutlinedButton(
+                            onClick = { showImportDeltasDialog = true },
+                            enabled = !isBusy,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                            border = BorderStroke(1.dp, WorkstationColors.BorderHairline),
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text("Import", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
                     }
                 }
             }
         }
 
-        LazyColumn(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            items(sessions, key = { it.id }) { session ->
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = WorkstationColors.SurfaceElevated,
-                    border = BorderStroke(1.dp, WorkstationColors.BorderHairline),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .animateContentSize(spring(0.86f, 480f)),
+        // 3. Saved CRDT Sessions
+        items(sessions, key = { it.id }) { session ->
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = WorkstationColors.SurfaceElevated,
+                border = BorderStroke(1.dp, WorkstationColors.BorderHairline),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .animateContentSize(spring(0.86f, 480f)),
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Column(
-                        modifier = Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
+                        Text(
+                            text = session.title,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = WorkstationColors.TextPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = WorkstationColors.SurfaceInteractive,
                         ) {
                             Text(
-                                text = session.title,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = WorkstationColors.TextPrimary,
+                                text = "${session.agentType} · v${session.lamportVersion}",
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp,
+                                color = WorkstationColors.AccentEmerald,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f),
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                             )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Surface(
-                                shape = RoundedCornerShape(6.dp),
-                                color = WorkstationColors.SurfaceInteractive,
-                            ) {
-                                Text(
-                                    text = "${session.agentType} · v${session.lamportVersion}",
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 10.sp,
-                                    color = WorkstationColors.AccentEmerald,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                )
-                            }
                         }
-                        Text(
-                            text = session.compactedSummary,
-                            fontSize = 12.sp,
-                            color = WorkstationColors.TextSecondary,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    }
+                    Text(
+                        text = session.compactedSummary,
+                        fontSize = 12.sp,
+                        color = WorkstationColors.TextSecondary,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        OutlinedButton(
+                            onClick = { onLaunchSafeCommand(session.toSafeLaunchCommand()) },
+                            enabled = !isBusy,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            border = BorderStroke(1.dp, WorkstationColors.BorderStrong),
+                            modifier = Modifier.weight(1f),
                         ) {
-                            OutlinedButton(
-                                onClick = { onLaunchSafeCommand(session.toSafeLaunchCommand()) },
-                                enabled = !isBusy,
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                                border = BorderStroke(1.dp, WorkstationColors.BorderStrong),
-                                modifier = Modifier.weight(1f),
-                            ) {
-                                Text("Open in Terminal", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                            TextButton(
-                                onClick = { onArchiveContext(session.id) },
-                                enabled = !isBusy,
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                            ) {
-                                Text("Archive", fontSize = 11.sp, color = WorkstationColors.AccentRose, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
+                            Text("Open in Terminal", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        TextButton(
+                            onClick = { onArchiveContext(session.id) },
+                            enabled = !isBusy,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        ) {
+                            Text("Archive", fontSize = 11.sp, color = WorkstationColors.AccentRose, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
                 }
@@ -249,11 +340,107 @@ internal fun AgentsWorkspacePanel(
 }
 
 @Composable
+private fun NativeAgentRow(
+    name: String,
+    detail: String,
+    installed: Boolean,
+    primaryLabel: String,
+    onPrimaryClick: () -> Unit,
+    secondaryLabel: String? = null,
+    onSecondaryClick: (() -> Unit)? = null,
+) {
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = WorkstationColors.SurfaceKeycap,
+        border = BorderStroke(
+            1.dp,
+            if (installed) WorkstationColors.AccentEmerald.copy(alpha = 0.28f)
+            else WorkstationColors.BorderHairline,
+        ),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(if (installed) WorkstationColors.AccentEmerald else WorkstationColors.AccentAmber)
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = name,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = WorkstationColors.TextPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = detail,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        color = if (installed) WorkstationColors.AccentGold else WorkstationColors.TextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = if (installed) WorkstationColors.AccentEmeraldWash else WorkstationColors.AccentAmberWash,
+                ) {
+                    Text(
+                        text = if (installed) "READY" else "SETUP",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (installed) WorkstationColors.AccentEmerald else WorkstationColors.AccentAmber,
+                        maxLines = 1,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Button(
+                    onClick = onPrimaryClick,
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(primaryLabel, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                if (secondaryLabel != null && onSecondaryClick != null) {
+                    OutlinedButton(
+                        onClick = onSecondaryClick,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        border = BorderStroke(1.dp, WorkstationColors.BorderStrong),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(secondaryLabel, fontSize = 11.sp, color = WorkstationColors.AccentGold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 internal fun ShieldAndVaultPanel(
     shieldScore: Int,
     bootstrapReady: Boolean,
     guardianStatus: GuardianStatus,
     tokenState: OAuthTokenState,
+    codingAgentsState: CodingAgentsState,
     installedReleaseTag: String,
     updateState: UpdateState,
     hasPrivateRepoToken: Boolean,
@@ -267,6 +454,7 @@ internal fun ShieldAndVaultPanel(
     onOpenAutostart: () -> Unit,
     onCopyPhantomAdbFix: () -> Unit,
     onOpenTokenDialog: () -> Unit,
+    onOpenCodingModelsDialog: () -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -532,6 +720,74 @@ internal fun ShieldAndVaultPanel(
                             text = if (tokenState.isPresent) "Rotate OAuth Token" else "Connect OAuth Token",
                             fontSize = 12.sp,
                             maxLines = 1,
+                        )
+                    }
+                }
+            }
+        }
+
+        // Coding Models & API Providers Vault Card (OpenRouter, Mistral, Ollama LAN + Free $0)
+        item {
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = WorkstationColors.SurfaceElevated,
+                border = BorderStroke(1.dp, WorkstationColors.BorderHairline),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = "Coding Models Vault (0600)",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = WorkstationColors.TextPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(
+                            text = "${codingAgentsState.configuredPaidOrLocalProvidersCount} API/LAN",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp,
+                            color = WorkstationColors.AccentGold,
+                            maxLines = 1,
+                        )
+                    }
+                    val activeModelSummary = codingAgentsState.activePreset?.let {
+                        "${it.displayName} · ${it.tier.badge}"
+                    } ?: codingAgentsState.activeOpenCodeModel ?: "Gratis \$0 (/models) · OpenCode v2"
+                    Text(
+                        text = activeModelSummary,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        color = WorkstationColors.AccentEmerald,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = "OpenRouter, Mistral Code & Ollama LAN locked to 0600 ({file:...}, excluded from snapshots).",
+                        fontSize = 11.sp,
+                        color = WorkstationColors.TextSecondary,
+                    )
+                    OutlinedButton(
+                        onClick = onOpenCodingModelsDialog,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                        border = BorderStroke(1.dp, WorkstationColors.BorderStrong),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            text = "Configure Coding Models & Keys",
+                            fontSize = 12.sp,
+                            color = WorkstationColors.AccentGold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
                     }
                 }

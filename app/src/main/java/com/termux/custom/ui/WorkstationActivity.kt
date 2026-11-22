@@ -60,6 +60,8 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.termux.app.TermuxActivity
 import com.termux.app.TermuxInstaller
 import com.termux.app.TermuxService
+import com.termux.custom.agents.CodingAgentsManager
+import com.termux.custom.agents.CodingAgentsState
 import com.termux.custom.bridge.TermuxViewSurfaceBridge
 import com.termux.custom.data.LocalFirstCrdtDatabase
 import com.termux.custom.guardian.GuardianStatus
@@ -86,6 +88,7 @@ class WorkstationActivity : ComponentActivity(), ServiceConnection {
 
     private lateinit var crdtDatabase: LocalFirstCrdtDatabase
     private lateinit var tokenWarden: AntigravityTokenWarden
+    private lateinit var codingAgentsManager: CodingAgentsManager
     private lateinit var storageOptimizer: StorageOptimizer
     private lateinit var releaseUpdater: GitHubReleaseUpdater
 
@@ -103,6 +106,7 @@ class WorkstationActivity : ComponentActivity(), ServiceConnection {
 
         crdtDatabase = LocalFirstCrdtDatabase.getInstance(this)
         tokenWarden = AntigravityTokenWarden(this)
+        codingAgentsManager = CodingAgentsManager()
         storageOptimizer = StorageOptimizer()
         releaseUpdater = GitHubReleaseUpdater(this)
         bootstrapReady = CustomBootstrapProvisioner.isBootstrapInstalled()
@@ -125,6 +129,7 @@ class WorkstationActivity : ComponentActivity(), ServiceConnection {
                     onRetryBindService = { startAndBindTermuxService() },
                     crdtDatabase = crdtDatabase,
                     tokenWarden = tokenWarden,
+                    codingAgentsManager = codingAgentsManager,
                     storageOptimizer = storageOptimizer,
                     releaseUpdater = releaseUpdater,
                 )
@@ -247,6 +252,7 @@ private fun WorkstationRoot(
     onRetryBindService: () -> Unit,
     crdtDatabase: LocalFirstCrdtDatabase,
     tokenWarden: AntigravityTokenWarden,
+    codingAgentsManager: CodingAgentsManager,
     storageOptimizer: StorageOptimizer,
     releaseUpdater: GitHubReleaseUpdater,
 ) {
@@ -279,6 +285,8 @@ private fun WorkstationRoot(
     var isCommandPaletteOpen by rememberSaveable { mutableStateOf(false) }
     var isTokenDialogOpen by rememberSaveable { mutableStateOf(false) }
     var tokenDialogError by rememberSaveable { mutableStateOf<String?>(null) }
+    var isCodingModelsDialogOpen by rememberSaveable { mutableStateOf(false) }
+    var codingModelsDialogError by rememberSaveable { mutableStateOf<String?>(null) }
     var isOtaTokenDialogOpen by rememberSaveable { mutableStateOf(false) }
     var isTutorialOpen by rememberSaveable { mutableStateOf(false) }
     var completedTutorialSteps by remember {
@@ -355,6 +363,17 @@ private fun WorkstationRoot(
                 posixModeOctal = "----",
                 storagePath = "",
                 syncedCliTargets = emptyList(),
+            )
+        )
+    }
+    var codingAgentsState by remember {
+        mutableStateOf(
+            CodingAgentsState(
+                agyInstalled = false,
+                opencodeInstalled = false,
+                activeOpenCodeModel = null,
+                ollamaBaseUrl = null,
+                providerStatuses = emptyMap(),
             )
         )
     }
@@ -503,6 +522,7 @@ private fun WorkstationRoot(
                     if (primaryTab == PrimaryTab.TERMINAL &&
                         !isCommandPaletteOpen &&
                         !isTokenDialogOpen &&
+                        !isCodingModelsDialogOpen &&
                         !isOtaTokenDialogOpen &&
                         !isTutorialOpen
                     ) {
@@ -511,6 +531,7 @@ private fun WorkstationRoot(
                     scope.launch {
                         ProcessGuardianService.refreshSnapshot(context)
                         tokenState = tokenWarden.inspectTokenState()
+                        codingAgentsState = codingAgentsManager.inspectState()
                         storageMetrics = storageOptimizer.inspectMetrics(storageMetrics.lastGcSummary)
                         releaseUpdater.refreshTokenState()
                     }
@@ -542,6 +563,7 @@ private fun WorkstationRoot(
         surfaceBridge.apply120HzFramePacing(activity)
         crdtDatabase.seedDefaultsIfFirstRun()
         tokenState = tokenWarden.inspectTokenState()
+        codingAgentsState = codingAgentsManager.inspectState()
         storageMetrics = storageOptimizer.inspectMetrics()
         releaseUpdater.refreshTokenState()
         ProcessGuardianService.refreshSnapshot(context)
@@ -677,6 +699,18 @@ private fun WorkstationRoot(
                     sessions = crdtSessions,
                     siteId = crdtDatabase.siteId,
                     isBusy = isAgentsBusy,
+                    codingAgentsState = codingAgentsState,
+                    onRefreshAgentsState = {
+                        scope.launch {
+                            codingAgentsState = codingAgentsManager.inspectState()
+                            notify("Agent status refreshed")
+                        }
+                    },
+                    onOpenCodingModelsDialog = {
+                        codingModelsDialogError = null
+                        scope.launch { codingAgentsState = codingAgentsManager.inspectState() }
+                        isCodingModelsDialogOpen = true
+                    },
                     onLaunchSafeCommand = dispatchCommandToPty,
                     onNewContext = { title, agentType, summary ->
                         scope.launch {
@@ -760,6 +794,7 @@ private fun WorkstationRoot(
                     bootstrapReady = bootstrapReady || liveSessions.isNotEmpty(),
                     guardianStatus = guardianStatus,
                     tokenState = tokenState,
+                    codingAgentsState = codingAgentsState,
                     installedReleaseTag = releaseUpdater.installedTag,
                     updateState = updateState,
                     hasPrivateRepoToken = hasPrivateRepoToken,
@@ -799,6 +834,11 @@ private fun WorkstationRoot(
                     onOpenTokenDialog = {
                         tokenDialogError = null
                         isTokenDialogOpen = true
+                    },
+                    onOpenCodingModelsDialog = {
+                        codingModelsDialogError = null
+                        scope.launch { codingAgentsState = codingAgentsManager.inspectState() }
+                        isCodingModelsDialogOpen = true
                     },
                 )
                 InspectorTab.STORAGE -> StorageBackupsPanel(
@@ -1062,6 +1102,12 @@ private fun WorkstationRoot(
                 tokenDialogError = null
                 isTokenDialogOpen = true
             },
+            onOpenCodingModelsVault = {
+                isCommandPaletteOpen = false
+                codingModelsDialogError = null
+                scope.launch { codingAgentsState = codingAgentsManager.inspectState() }
+                isCodingModelsDialogOpen = true
+            },
             onCheckAppUpdate = {
                 isCommandPaletteOpen = false
                 notify("Checking GitHub Releases…", showSnackbar = true)
@@ -1070,6 +1116,79 @@ private fun WorkstationRoot(
             onOpenTutorial = {
                 isCommandPaletteOpen = false
                 isTutorialOpen = true
+            },
+        )
+    }
+
+    if (isCodingModelsDialogOpen) {
+        CodingModelsVaultDialog(
+            state = codingAgentsState,
+            errorText = codingModelsDialogError,
+            onDismiss = {
+                codingModelsDialogError = null
+                isCodingModelsDialogOpen = false
+            },
+            onSelectModel = { preset ->
+                scope.launch {
+                    codingAgentsManager.selectCodingModel(preset).onSuccess { updated ->
+                        codingAgentsState = updated
+                        codingModelsDialogError = null
+                        val needsSetupHint = !updated.isProviderReady(preset.provider)
+                        notify(
+                            if (needsSetupHint) {
+                                "Selected ${preset.displayName} — add ${preset.provider.displayName} key/URL above"
+                            } else {
+                                "Active coding model: ${preset.displayName}"
+                            },
+                            showSnackbar = true,
+                        )
+                    }.onFailure { err ->
+                        codingModelsDialogError = err.message ?: "Failed to save coding model"
+                    }
+                }
+            },
+            onSaveApiKey = { provider, rawKey ->
+                scope.launch {
+                    codingAgentsManager.saveProviderApiKey(provider, rawKey).onSuccess { updated ->
+                        codingAgentsState = updated
+                        codingModelsDialogError = null
+                        notify("${provider.displayName} key locked (0600)", showSnackbar = true)
+                    }.onFailure { err ->
+                        codingModelsDialogError = err.message ?: "Invalid API key"
+                    }
+                }
+            },
+            onClearApiKey = { provider ->
+                scope.launch {
+                    codingAgentsState = codingAgentsManager.clearProviderApiKey(provider)
+                    codingModelsDialogError = null
+                    notify("${provider.displayName} key cleared", showSnackbar = true)
+                }
+            },
+            onSaveOllamaUrl = { rawUrl ->
+                scope.launch {
+                    codingAgentsManager.saveOllamaBaseUrl(rawUrl).onSuccess { updated ->
+                        codingAgentsState = updated
+                        codingModelsDialogError = null
+                        notify("Ollama LAN saved: ${updated.ollamaBaseUrl}", showSnackbar = true)
+                    }.onFailure { err ->
+                        codingModelsDialogError = err.message ?: "Invalid Ollama URL"
+                    }
+                }
+            },
+            onClearOllamaUrl = {
+                scope.launch {
+                    codingAgentsState = codingAgentsManager.clearOllamaBaseUrl()
+                    codingModelsDialogError = null
+                    notify("Ollama endpoint cleared", showSnackbar = true)
+                }
+            },
+            onLaunchOrInstallOpenCode = {
+                codingModelsDialogError = null
+                isCodingModelsDialogOpen = false
+                dispatchCommandToPty(
+                    if (codingAgentsState.opencodeInstalled) "opencode" else "workstation install-opencode"
+                )
             },
         )
     }

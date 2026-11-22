@@ -11,7 +11,7 @@ object CustomBootstrapProvisioner {
 
     private const val LOG_TAG = "CustomBootstrapProvisioner"
     private const val ASSET_SCRIPT_PATH = "custom/bootstrap-custom.sh"
-    private const val STAMP_VERSION_FILE = ".config/melcat/.bootstrap_provisioned_v7"
+    private const val STAMP_VERSION_FILE = ".config/melcat/.bootstrap_provisioned_v8"
     private val provisioningLock = Any()
 
     private fun hasValidPrefixBinaries(): Boolean {
@@ -79,20 +79,29 @@ object CustomBootstrapProvisioner {
 
         val geminiSkillsDir = File(homeDir, ".gemini/config/skills")
         val agyCliDir = File(homeDir, ".gemini/antigravity-cli")
+        val opencodeConfigDir = File(homeDir, ".config/opencode")
         val claudeDir = File(homeDir, ".claude")
         val antigravityConfigDir = File(homeDir, ".config/antigravity")
         val melcatConfigDir = File(homeDir, ".config/melcat")
+        val melcatVaultDir = File(homeDir, ".config/melcat/vault")
 
         geminiSkillsDir.mkdirs()
         agyCliDir.mkdirs()
+        opencodeConfigDir.mkdirs()
         claudeDir.mkdirs()
         antigravityConfigDir.mkdirs()
         melcatConfigDir.mkdirs()
+        melcatVaultDir.mkdirs()
         runCatching { Os.chmod(antigravityConfigDir.absolutePath, 448) } // 0700
         runCatching { Os.chmod(agyCliDir.absolutePath, 448) } // 0700
+        runCatching { Os.chmod(melcatVaultDir.absolutePath, 448) } // 0700
 
-        // Safely link both ~/.claude/skills and ~/.gemini/antigravity-cli/skills -> ~/.gemini/config/skills
-        listOf(File(claudeDir, "skills"), File(agyCliDir, "skills")).forEach { link ->
+        // Safely link ~/.gemini/antigravity-cli/skills, ~/.config/opencode/skills, and ~/.claude/skills -> ~/.gemini/config/skills
+        listOf(
+            File(claudeDir, "skills"),
+            File(agyCliDir, "skills"),
+            File(opencodeConfigDir, "skills"),
+        ).forEach { link ->
             runCatching {
                 val lstatExists = runCatching { Os.lstat(link.absolutePath) }.isSuccess
                 if (lstatExists && !link.exists()) {

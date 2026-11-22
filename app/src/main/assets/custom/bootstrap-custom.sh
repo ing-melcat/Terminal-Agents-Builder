@@ -1,33 +1,44 @@
 #!/data/data/com.termux/files/usr/bin/sh
-# bootstrap-custom.sh — Idempotent post-bootstrap provisioner for Terminal Agents Builder
+# bootstrap-custom.sh — Idempotent post-bootstrap provisioner for Terminal Agents Builder (RUR Edition)
 # Runs strictly AFTER TermuxInstaller atomic rename ($STAGING_PREFIX -> $PREFIX).
 
 set -eu
 
 PREFIX="/data/data/com.termux/files/usr"
 HOME_DIR="/data/data/com.termux/files/home"
-STAMP_FILE="$HOME_DIR/.config/melcat/.bootstrap_provisioned_v7"
+STAMP_FILE="$HOME_DIR/.config/melcat/.bootstrap_provisioned_v8"
 
 export PATH="$PREFIX/bin:$PATH"
 export HOME="$HOME_DIR"
 
 mkdir -p "$HOME_DIR/.config/melcat"
+mkdir -p "$HOME_DIR/.config/melcat/vault"
 mkdir -p "$HOME_DIR/.config/antigravity"
+mkdir -p "$HOME_DIR/.config/opencode"
 mkdir -p "$HOME_DIR/.gemini/config/skills"
 mkdir -p "$HOME_DIR/.gemini/antigravity-cli"
 mkdir -p "$HOME_DIR/.claude"
 mkdir -p "$HOME_DIR/.local/share/melcat/logs"
 mkdir -p "$HOME_DIR/.local/share/melcat/snapshots"
 
-chmod 0700 "$HOME_DIR/.config/antigravity" "$HOME_DIR/.gemini" "$HOME_DIR/.gemini/antigravity-cli" "$HOME_DIR/.local/share/melcat/snapshots" 2>/dev/null || true
+chmod 0700 \
+    "$HOME_DIR/.config/melcat/vault" \
+    "$HOME_DIR/.config/antigravity" \
+    "$HOME_DIR/.gemini" \
+    "$HOME_DIR/.gemini/antigravity-cli" \
+    "$HOME_DIR/.local/share/melcat/snapshots" 2>/dev/null || true
 
 # Clean up deprecated helper from earlier versions if present
 rm -f "$PREFIX/etc/melcat/agy-oauth.js" 2>/dev/null || true
 
-# 1. Unified skills symlinks:
-#    ~/.claude/skills                  -> ~/.gemini/config/skills
+# 1. Unified skills symlinks across Antigravity CLI, OpenCode v2, and Claude CLI:
 #    ~/.gemini/antigravity-cli/skills  -> ~/.gemini/config/skills
-for LINK_TARGET in "$HOME_DIR/.claude/skills" "$HOME_DIR/.gemini/antigravity-cli/skills"; do
+#    ~/.config/opencode/skills         -> ~/.gemini/config/skills
+#    ~/.claude/skills                  -> ~/.gemini/config/skills
+for LINK_TARGET in \
+    "$HOME_DIR/.claude/skills" \
+    "$HOME_DIR/.gemini/antigravity-cli/skills" \
+    "$HOME_DIR/.config/opencode/skills"; do
     if [ ! -L "$LINK_TARGET" ]; then
         rm -rf "$LINK_TARGET"
         ln -s "$HOME_DIR/.gemini/config/skills" "$LINK_TARGET"
@@ -45,12 +56,26 @@ name: $skill
 description: Active workstation skill ($skill) provisioned by Terminal Agents Builder
 ---
 # $skill
-Provisioned for arm64-v8a native Antigravity CLI (agy) & Claude CLI execution.
+Provisioned for arm64-v8a native Antigravity CLI (agy) & OpenCode v2 execution.
 EOF
     fi
 done
 
-# 3. Install Android browser launcher bridge (termux-open-url & xdg-open) so real `agy` opens Chrome natively
+# 2b. Seed OpenCode v2 Termux touch-keyboard keybind fix (~/.config/opencode/cli.json) ONLY if absent.
+#     Android soft keyboards cannot emit Shift+Tab; binding agent.cycle to Tab lets users switch Build/Plan.
+if [ ! -s "$HOME_DIR/.config/opencode/cli.json" ]; then
+    cat > "$HOME_DIR/.config/opencode/cli.json" <<'EOF'
+{
+  "$schema": "https://opencode.ai/v2/cli.json",
+  "keybinds": {
+    "agent.cycle": "tab",
+    "agent.cycle.reverse": "shift+tab"
+  }
+}
+EOF
+fi
+
+# 3. Install Android browser launcher bridge (termux-open-url & xdg-open) so `agy` & `opencode` open Chrome natively
 cat > "$PREFIX/bin/termux-open-url" <<'EOF'
 #!/data/data/com.termux/files/usr/bin/sh
 URL="${1:-}"
@@ -64,7 +89,7 @@ EOF
 chmod 0700 "$PREFIX/bin/termux-open-url"
 ln -sf "$PREFIX/bin/termux-open-url" "$PREFIX/bin/xdg-open"
 
-# 4. Install melcat-gc (Storage & Cache Optimizer + zstd snapshot tool, strictly excluding OAuth tokens)
+# 4. Install melcat-gc (Storage & Cache Optimizer + zstd snapshot tool, strictly excluding OAuth & API vaults)
 cat > "$PREFIX/bin/melcat-gc" <<'EOF'
 #!/data/data/com.termux/files/usr/bin/sh
 set -eu
@@ -87,28 +112,58 @@ fi
 
 if [ "${1:-}" = "--snapshot" ]; then
     TS="$(date +%Y%m%d-%H%M%S)"
-    if command -v zstd >/dev/null 2>&1; then
+    SOURCES=""
+    for d in .gemini .claude .config/melcat .config/opencode; do
+        if [ -e "$HOME_DIR/$d" ]; then
+            SOURCES="$SOURCES $d"
+        fi
+    done
+    if [ -z "$SOURCES" ]; then
+        echo "[storage-gc] Nothing to snapshot yet."
+    elif command -v zstd >/dev/null 2>&1; then
         OUT="$SNAP_DIR/agent-workspace-$TS.tar.zst"
-        tar --exclude='*oauth-token*' --exclude='*oauth_creds.json*' \
+        # shellcheck disable=SC2086
+        if tar --exclude='*oauth-token*' --exclude='*oauth_creds.json*' \
+            --exclude='*credentials*' --exclude='*auth.json*' \
             --exclude='.gemini/antigravity-cli/antigravity-oauth-token' \
             --exclude='.config/antigravity/antigravity-oauth-token' \
             --exclude='.gemini/antigravity-oauth-token' \
             --exclude='.gemini/oauth_creds.json' \
             --exclude='.gemini/google_accounts.json' \
-            -cf - -C "$HOME_DIR" .gemini .claude .config/melcat 2>/dev/null | zstd -T0 -q -o "$OUT"
-        chmod 0600 "$OUT" 2>/dev/null || true
-        echo "[storage-gc] Portable zstd snapshot written (secrets excluded): $OUT"
+            --exclude='.config/melcat/vault*' \
+            --exclude='*.key' \
+            --exclude='*providers.env*' \
+            --exclude='.local/share/opencode/opencode.db*' \
+            --exclude='.local/share/opencode/auth.json*' \
+            -cf - -C "$HOME_DIR" $SOURCES 2>/dev/null | zstd -T0 -q -o "$OUT"; then
+            chmod 0600 "$OUT" 2>/dev/null || true
+            echo "[storage-gc] Portable zstd snapshot written (secrets excluded): $OUT"
+        else
+            rm -f "$OUT"
+            echo "[storage-gc] ERROR: zstd snapshot failed." >&2
+        fi
     else
         OUT_GZ="$SNAP_DIR/agent-workspace-$TS.tar.gz"
-        tar --exclude='*oauth-token*' --exclude='*oauth_creds.json*' \
+        # shellcheck disable=SC2086
+        if tar --exclude='*oauth-token*' --exclude='*oauth_creds.json*' \
+            --exclude='*credentials*' --exclude='*auth.json*' \
             --exclude='.gemini/antigravity-cli/antigravity-oauth-token' \
             --exclude='.config/antigravity/antigravity-oauth-token' \
             --exclude='.gemini/antigravity-oauth-token' \
             --exclude='.gemini/oauth_creds.json' \
             --exclude='.gemini/google_accounts.json' \
-            -czf "$OUT_GZ" -C "$HOME_DIR" .gemini .claude .config/melcat 2>/dev/null
-        chmod 0600 "$OUT_GZ" 2>/dev/null || true
-        echo "[storage-gc] Portable gzip snapshot written (secrets excluded): $OUT_GZ"
+            --exclude='.config/melcat/vault*' \
+            --exclude='*.key' \
+            --exclude='*providers.env*' \
+            --exclude='.local/share/opencode/opencode.db*' \
+            --exclude='.local/share/opencode/auth.json*' \
+            -czf "$OUT_GZ" -C "$HOME_DIR" $SOURCES 2>/dev/null; then
+            chmod 0600 "$OUT_GZ" 2>/dev/null || true
+            echo "[storage-gc] Portable gzip snapshot written (secrets excluded): $OUT_GZ"
+        else
+            rm -f "$OUT_GZ"
+            echo "[storage-gc] ERROR: gzip snapshot failed." >&2
+        fi
     fi
 fi
 
@@ -116,16 +171,18 @@ df -h "$PREFIX" | tail -n 1 | awk '{print "[storage-gc] Free storage: " $4 " (" 
 EOF
 chmod 0700 "$PREFIX/bin/melcat-gc"
 
-# 5. Install `workstation` controller CLI (keeps `$PREFIX/bin/agy` 100% dedicated to the real Google Antigravity CLI)
+# 5. Install `workstation` controller CLI (keeps `$PREFIX/bin/agy` and `$PREFIX/bin/opencode` dedicated to real binaries)
 cat > "$PREFIX/bin/workstation" <<'EOF'
 #!/data/data/com.termux/files/usr/bin/sh
 set -eu
 PREFIX="/data/data/com.termux/files/usr"
 HOME_DIR="/data/data/com.termux/files/home"
 SKILLS_DIR="$HOME_DIR/.gemini/config/skills"
+VAULT_DIR="$HOME_DIR/.config/melcat/vault"
 AGY_CLI_TOKEN="$HOME_DIR/.gemini/antigravity-cli/antigravity-oauth-token"
 AGY_CFG_TOKEN="$HOME_DIR/.config/antigravity/antigravity-oauth-token"
 AGY_INSTALLER_URL="https://raw.githubusercontent.com/wallentx/antigravity-cli-termux/dev/install.sh"
+OPENCODE_APT_BASE="https://bd-loser.github.io/opencode-bionic"
 
 find_active_token() {
     for f in "$AGY_CLI_TOKEN" "$AGY_CFG_TOKEN" "$HOME_DIR/.gemini/antigravity-oauth-token"; do
@@ -173,14 +230,87 @@ install_real_agy() {
     fi
 }
 
+install_native_opencode() {
+    if [ "$(uname -m)" != "aarch64" ]; then
+        echo "[workstation] ERROR: native opencode-bionic requires aarch64 (detected $(uname -m))." >&2
+        return 1
+    fi
+    echo "[workstation] Installing native Bionic OpenCode v2 (aarch64, zero proot/glibc)..."
+    export DEBIAN_FRONTEND=noninteractive
+    pkg update -y
+    pkg install -y -o Dpkg::Options::=--force-confold curl ca-certificates
+
+    mkdir -p "$PREFIX/etc/apt/keyrings" "$PREFIX/etc/apt/sources.list.d" "$PREFIX/etc/apt/preferences.d"
+    rm -f "$PREFIX/etc/apt/trusted.gpg.d/opencode-bionic.gpg"
+
+    KEYRING="$PREFIX/etc/apt/keyrings/opencode-bionic.gpg"
+    TMP_KEY="$KEYRING.tmp.$$"
+    echo "[workstation] Adding scoped opencode-bionic APT repository (stable v2 channel)..."
+    if ! curl -fsSL --connect-timeout 15 --max-time 60 \
+        "$OPENCODE_APT_BASE/opencode-bionic.gpg" -o "$TMP_KEY" || [ ! -s "$TMP_KEY" ]; then
+        rm -f "$TMP_KEY"
+        echo "[workstation] ERROR: failed to download opencode-bionic GPG key." >&2
+        return 1
+    fi
+    chmod 0644 "$TMP_KEY"
+    mv -f "$TMP_KEY" "$KEYRING"
+
+    cat > "$PREFIX/etc/apt/sources.list.d/opencode-bionic.list" <<APTEOF
+deb [arch=aarch64 signed-by=$KEYRING] $OPENCODE_APT_BASE stable main
+APTEOF
+
+    cat > "$PREFIX/etc/apt/preferences.d/opencode-bionic" <<'PINEOF'
+Package: *
+Pin: origin bd-loser.github.io
+Pin-Priority: -1
+
+Package: opencode
+Pin: origin bd-loser.github.io
+Pin-Priority: 1001
+PINEOF
+
+    pkg update -y
+    pkg install -y -o Dpkg::Options::=--force-confold --allow-downgrades opencode
+
+    mkdir -p "$HOME_DIR/.config/opencode"
+    if [ ! -L "$HOME_DIR/.config/opencode/skills" ]; then
+        rm -rf "$HOME_DIR/.config/opencode/skills"
+        ln -s "$SKILLS_DIR" "$HOME_DIR/.config/opencode/skills"
+    fi
+    if [ ! -s "$HOME_DIR/.config/opencode/cli.json" ]; then
+        cat > "$HOME_DIR/.config/opencode/cli.json" <<'CLIEOF'
+{
+  "$schema": "https://opencode.ai/v2/cli.json",
+  "keybinds": {
+    "agent.cycle": "tab",
+    "agent.cycle.reverse": "shift+tab"
+  }
+}
+CLIEOF
+    fi
+
+    if [ -x "$PREFIX/bin/opencode" ]; then
+        echo "[workstation] Native OpenCode installed: $("$PREFIX/bin/opencode" --version 2>/dev/null || echo 'ready')"
+        echo "[workstation] Run 'opencode' (use /models for free models, or configure Coding Models in Agents -> Models)."
+    else
+        echo "[workstation] ERROR: OpenCode binary was not installed cleanly." >&2
+        return 1
+    fi
+}
+
 print_help() {
     echo "============================================================"
-    echo " Terminal Agents Builder — Workstation Controller"
+    echo " Terminal Agents Builder (RUR) — Workstation Controller"
     echo "============================================================"
     if [ -x "$PREFIX/bin/agy.va39" ] && [ -x "$PREFIX/bin/agy" ]; then
         echo " Antigravity: INSTALLED ($("$PREFIX/bin/agy" --version 2>/dev/null || echo 'native arm64'))"
     else
         echo " Antigravity: NOT INSTALLED (run 'workstation setup' or 'agy')"
+    fi
+    if [ -x "$PREFIX/bin/opencode" ]; then
+        echo " OpenCode v2: INSTALLED ($("$PREFIX/bin/opencode" --version 2>/dev/null || echo 'native bionic'))"
+    else
+        echo " OpenCode v2: NOT INSTALLED (run 'workstation install-opencode')"
     fi
     echo " Skills Dir : $SKILLS_DIR ($(ls -1 "$SKILLS_DIR" 2>/dev/null | tr '\n' ' '))"
     if TF="$(find_active_token 2>/dev/null)"; then
@@ -190,15 +320,17 @@ print_help() {
     fi
     echo "------------------------------------------------------------"
     echo " Commands:"
-    echo "   agy                    -> Run official Google Antigravity CLI"
-    echo "   workstation setup      -> Install native Antigravity CLI + toolchain"
-    echo "   workstation install-agy-> Install/reinstall native Antigravity CLI (agy)"
-    echo "   workstation upgrade    -> Upgrade Termux packages + 'agy update'"
-    echo "   workstation doctor     -> Diagnose agy, glibc, TLS, DNS, skills & vault"
-    echo "   workstation skills     -> List unified Antigravity & Claude skills"
-    echo "   workstation token      -> Check Antigravity OAuth 0600 status"
-    echo "   workstation ui         -> Bring 120Hz Workstation UI to front"
-    echo "   melcat-gc              -> Clean caches & create zstd backups"
+    echo "   agy                         -> Run official Google Antigravity CLI"
+    echo "   opencode                    -> Run native Bionic OpenCode v2 CLI"
+    echo "   workstation setup           -> Install native agy + developer toolchain"
+    echo "   workstation install-agy     -> Install/reinstall native Antigravity CLI"
+    echo "   workstation install-opencode-> Install/upgrade native Bionic OpenCode v2"
+    echo "   workstation upgrade         -> Upgrade Termux packages (incl. opencode) + agy"
+    echo "   workstation doctor          -> Diagnose agy, opencode, glibc, TLS, skills & vaults"
+    echo "   workstation skills          -> List unified agy/opencode/claude skills"
+    echo "   workstation token           -> Check Antigravity OAuth & Coding Vault 0600"
+    echo "   workstation ui              -> Bring 120Hz Workstation UI to front"
+    echo "   melcat-gc                   -> Clean caches & create zstd backups"
     echo "============================================================"
 }
 
@@ -211,13 +343,16 @@ case "${1:-ui}" in
         echo "[workstation] Installing developer toolchain (git, zstd, zsh, tmux, ripgrep, jq)..."
         export DEBIAN_FRONTEND=noninteractive
         pkg install -y -o Dpkg::Options::=--force-confold git zstd zsh tmux ripgrep jq
-        echo "[workstation] Ready! Run 'agy' to launch Google Antigravity CLI."
+        echo "[workstation] Ready! Run 'agy' for Antigravity CLI, or 'workstation install-opencode' for OpenCode v2."
         ;;
     install-agy|reinstall-agy)
         install_real_agy
         ;;
+    install-opencode|reinstall-opencode)
+        install_native_opencode
+        ;;
     upgrade|--upgrade)
-        echo "[workstation] Upgrading Termux packages..."
+        echo "[workstation] Upgrading Termux packages (including OpenCode if installed)..."
         export DEBIAN_FRONTEND=noninteractive
         pkg update -y && pkg upgrade -y -o Dpkg::Options::=--force-confold
         if [ -x "$PREFIX/bin/agy.va39" ] && [ -x "$PREFIX/bin/agy" ]; then
@@ -229,7 +364,7 @@ case "${1:-ui}" in
     skills|--skills)
         echo "[workstation] Active global skills in $SKILLS_DIR:"
         ls -1 "$SKILLS_DIR" 2>/dev/null || true
-        echo "  -> symlinked to ~/.gemini/antigravity-cli/skills and ~/.claude/skills"
+        echo "  -> symlinked to ~/.gemini/antigravity-cli/skills, ~/.config/opencode/skills & ~/.claude/skills"
         ;;
     token|--token)
         if TF="$(find_active_token 2>/dev/null)"; then
@@ -237,6 +372,15 @@ case "${1:-ui}" in
             echo "[workstation] Antigravity OAuth ACTIVE at $TF (mode: 0$MODE)"
         else
             echo "[workstation] Antigravity OAuth NOT set. Run 'agy' to sign in with Google."
+        fi
+        for prov in openrouter mistral; do
+            KF="$VAULT_DIR/$prov.key"
+            if [ -s "$KF" ]; then
+                echo "[workstation] Coding Vault ($prov): ACTIVE (mode: 0$(stat -c '%a' "$KF" 2>/dev/null || echo '600'))"
+            fi
+        done
+        if [ -s "$VAULT_DIR/ollama.url" ]; then
+            echo "[workstation] Ollama LAN endpoint: $(cat "$VAULT_DIR/ollama.url")"
         fi
         ;;
     doctor|--doctor)
@@ -246,6 +390,15 @@ case "${1:-ui}" in
             echo "  [ok]      agy ($VER)"
         else
             echo "  [missing] agy (Antigravity CLI) -> run 'workstation setup'"
+        fi
+        if [ -x "$PREFIX/bin/opencode" ]; then
+            OCVER="$("$PREFIX/bin/opencode" --version 2>/dev/null || echo 'error executing')"
+            echo "  [ok]      opencode ($OCVER, native bionic)"
+        else
+            echo "  [opt]     opencode (OpenCode v2) -> run 'workstation install-opencode'"
+        fi
+        if [ -s "$HOME_DIR/.config/opencode/cli.json" ]; then
+            echo "  [ok]      opencode cli.json (Tab agent.cycle keybind)"
         fi
         if [ -x "$PREFIX/glibc/lib/ld-linux-aarch64.so.1" ]; then
             echo "  [ok]      glibc loader (ld-linux-aarch64.so.1)"
@@ -271,9 +424,18 @@ case "${1:-ui}" in
         done
         echo "  skills : $(ls -1 "$SKILLS_DIR" 2>/dev/null | wc -l | tr -d ' ') in $SKILLS_DIR"
         if TF="$(find_active_token 2>/dev/null)"; then
-            echo "  [ok]      OAuth token ($TF, mode 0$(stat -c '%a' "$TF" 2>/dev/null || echo '600'))"
+            echo "  [ok]      Antigravity OAuth ($TF, mode 0$(stat -c '%a' "$TF" 2>/dev/null || echo '600'))"
         else
-            echo "  [warn]    Not signed in -> run 'agy'"
+            echo "  [warn]    Antigravity not signed in -> run 'agy'"
+        fi
+        for prov in openrouter mistral; do
+            KF="$VAULT_DIR/$prov.key"
+            if [ -s "$KF" ]; then
+                echo "  [ok]      Coding Vault $prov (mode 0$(stat -c '%a' "$KF" 2>/dev/null || echo '600'))"
+            fi
+        done
+        if [ -s "$VAULT_DIR/ollama.url" ]; then
+            echo "  [ok]      Ollama LAN ($(cat "$VAULT_DIR/ollama.url"))"
         fi
         echo "  storage: $(du -sh "$HOME_DIR" 2>/dev/null | cut -f1) in HOME"
         ;;
@@ -306,8 +468,9 @@ EOF
     chmod 0700 "$PREFIX/bin/agy"
 fi
 
-# 7. Configure shell profiles (~/.bashrc and ~/.zshrc) cleanly for real Antigravity CLI + browser bridge
+# 7. Configure shell profiles (~/.bashrc and ~/.zshrc) cleanly for real Antigravity CLI, OpenCode & 0600 vault env
 MARKER="# >>> TERMINAL-AGENTS-BUILDER >>>"
+VAULT_MARKER="# >>> TERMINAL-AGENTS-VAULT-ENV >>>"
 for PROFILE_RC in "$HOME_DIR/.bashrc" "$HOME_DIR/.zshrc"; do
     if [ ! -f "$PROFILE_RC" ] || ! grep -q "$MARKER" "$PROFILE_RC"; then
         cat >> "$PROFILE_RC" <<'EOF'
@@ -319,6 +482,16 @@ export PATH="/data/data/com.termux/files/usr/bin:$HOME/.local/bin:$PATH"
 alias gc='melcat-gc'
 alias gc-snap='melcat-gc --snapshot'
 # <<< TERMINAL-AGENTS-BUILDER <<<
+EOF
+    fi
+    if ! grep -q "$VAULT_MARKER" "$PROFILE_RC"; then
+        cat >> "$PROFILE_RC" <<'EOF'
+
+# >>> TERMINAL-AGENTS-VAULT-ENV >>>
+if [ -r "$HOME/.config/melcat/vault/providers.env" ]; then
+    . "$HOME/.config/melcat/vault/providers.env"
+fi
+# <<< TERMINAL-AGENTS-VAULT-ENV <<<
 EOF
     fi
 done

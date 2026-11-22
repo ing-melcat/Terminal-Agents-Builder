@@ -228,5 +228,113 @@ class TermuxWorkstationCustomLayerTest {
         val activeToken = missingToken.copy(isPresent = true, posixModeOctal = "0600")
         assertEquals(100, com.termux.custom.ui.computeShieldScore(true, baseGuardian, activeToken))
     }
+
+    @Test
+    fun `CodingAgentsManager enforces 0600 vault, zero plaintext secrets in opencode_json, and preserves user config`() = runTest(testDispatcher) {
+        val tempRoot = java.nio.file.Files.createTempDirectory("melcat-coding-agents-test").toFile()
+        try {
+            val prefixDir = java.io.File(tempRoot, "usr").apply { mkdirs() }
+            val homeDir = java.io.File(tempRoot, "home").apply { mkdirs() }
+            val manager = com.termux.custom.agents.CodingAgentsManager(
+                prefixDir = prefixDir,
+                homeDir = homeDir,
+                ioDispatcher = testDispatcher,
+            )
+
+            // Seed pre-existing user config inside opencode.json with JSONC trailing comma (must be preserved!)
+            val opencodeDir = java.io.File(homeDir, ".config/opencode").apply { mkdirs() }
+            val opencodeJson = java.io.File(opencodeDir, "opencode.json")
+            opencodeJson.writeText("""{"instructions":["AGENTS.md",],"snapshots":true,}""")
+
+            // Reject invalid whitespace API key
+            val badKey = manager.saveProviderApiKey(
+                com.termux.custom.agents.CodingProvider.OPENROUTER,
+                "sk-or-v1 bad\nrm -rf /",
+            )
+            assertTrue(badKey.isFailure)
+
+            // Save valid OpenRouter API key
+            val secret = "sk-or-v1-testsecret998877665544332211"
+            val saved = manager.saveProviderApiKey(
+                com.termux.custom.agents.CodingProvider.OPENROUTER,
+                secret,
+            ).getOrThrow()
+
+            val orStatus = saved.providerStatuses[com.termux.custom.agents.CodingProvider.OPENROUTER]!!
+            assertTrue(orStatus.isConfigured)
+            assertEquals("0600", orStatus.posixModeOctal)
+
+            // Verify zero plaintext secret inside opencode.json, zero '\/' escaping, and user fields preserved
+            val rawConfig = opencodeJson.readText()
+            assertFalse("Plaintext secret must NEVER appear in opencode.json", rawConfig.contains(secret))
+            assertFalse("org.json escaped slashes must be cleaned", rawConfig.contains("\\/"))
+            assertTrue(rawConfig.contains("{file:~/.config/melcat/vault/openrouter.key}"))
+            assertTrue(rawConfig.contains("AGENTS.md"))
+
+            // Verify cli.json Termux touch-keyboard keybind seeded cleanly without escaped slashes
+            val cliJson = java.io.File(opencodeDir, "cli.json")
+            assertTrue(cliJson.isFile)
+            assertTrue(cliJson.readText().contains("\"agent.cycle\": \"tab\""))
+            assertFalse(cliJson.readText().contains("\\/"))
+
+            // Select coding-only model preset
+            val qwenNext = com.termux.custom.agents.CodingModelCatalog.findById("openrouter/qwen/qwen3-coder-next")!!
+            val afterSelect = manager.selectCodingModel(qwenNext).getOrThrow()
+            assertEquals("openrouter/qwen/qwen3-coder-next", afterSelect.activeOpenCodeModel)
+
+            // Ollama LAN URL normalization + injection/credentials/query/port rejection
+            assertTrue(manager.saveOllamaBaseUrl("http://192.168.1.50:11434;whoami").isFailure)
+            assertTrue(manager.saveOllamaBaseUrl("file:///etc/passwd").isFailure)
+            assertTrue(manager.saveOllamaBaseUrl("http://user:secret@192.168.1.50:11434/v1").isFailure)
+            assertTrue(manager.saveOllamaBaseUrl("http://192.168.1.50:11434/v1?foo=bar").isFailure)
+            assertTrue(manager.saveOllamaBaseUrl("http://192.168.1.50:99999/v1").isFailure)
+            val afterOllama = manager.saveOllamaBaseUrl("http://192.168.1.50:11434").getOrThrow()
+            assertEquals("http://192.168.1.50:11434/v1", afterOllama.ollamaBaseUrl)
+
+            // Clear API key wipes secret cleanly
+            val afterClear = manager.clearProviderApiKey(com.termux.custom.agents.CodingProvider.OPENROUTER)
+            assertFalse(afterClear.providerStatuses[com.termux.custom.agents.CodingProvider.OPENROUTER]!!.isConfigured)
+            assertFalse(java.io.File(homeDir, ".config/melcat/vault/openrouter.key").exists())
+
+            // Corrupt opencode.json must NOT be silently wiped on mutation
+            opencodeJson.writeText("{ broken json")
+            val failOnCorrupt = manager.selectCodingModel(qwenNext)
+            assertTrue(failOnCorrupt.isFailure)
+            assertEquals("{ broken json", opencodeJson.readText())
+
+            // Verify binary detection for agy (requires agy + agy.va39) and opencode
+            val binDir = java.io.File(prefixDir, "bin").apply { mkdirs() }
+            java.io.File(binDir, "opencode").apply { writeText("#!/bin/sh\n"); setExecutable(true) }
+            val detected = manager.inspectState()
+            assertFalse(detected.agyInstalled)
+            assertTrue(detected.opencodeInstalled)
+        } finally {
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `CodingModelCatalog covers Free, Local, Budget, and Pro coding tiers and opencode is CRDT-allowlisted`() {
+        val tiers = com.termux.custom.agents.CodingModelCatalog.presets.map { it.tier }.toSet()
+        assertTrue(com.termux.custom.agents.CodingBudgetTier.FREE in tiers)
+        assertTrue(com.termux.custom.agents.CodingBudgetTier.LOCAL in tiers)
+        assertTrue(com.termux.custom.agents.CodingBudgetTier.BUDGET in tiers)
+        assertTrue(com.termux.custom.agents.CodingBudgetTier.PRO in tiers)
+        assertTrue(com.termux.custom.agents.CodingModelCatalog.presets.all { it.id.contains("/") })
+
+        val ocRecord = AgentSessionRecord(
+            id = "sess-oc",
+            title = "OpenCode Session",
+            agentType = "opencode",
+            workingDir = "/data/data/com.termux/files/home",
+            compactedSummary = "Coding agent",
+            contextTokens = 0,
+            lamportVersion = 1L,
+            siteId = "node-1",
+            updatedAt = 0L,
+            isDeleted = false,
+        )
+        assertEquals("opencode", ocRecord.toSafeLaunchCommand())
+    }
 }
 

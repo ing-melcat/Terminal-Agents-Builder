@@ -71,6 +71,10 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.foundation.Image
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import com.termux.R
 import com.termux.custom.bridge.TermuxViewSurfaceBridge
 import com.termux.custom.updater.ReleaseInfo
 import com.termux.custom.updater.UpdateState
@@ -81,6 +85,28 @@ internal data class LivePtyTab(
     val title: String,
     val isRunning: Boolean,
 )
+
+@Composable
+internal fun RurBrandBadge(
+    size: Dp = 26.dp,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        shape = CircleShape,
+        color = WorkstationColors.SurfaceBase,
+        border = BorderStroke(1.dp, WorkstationColors.AccentGold.copy(alpha = 0.55f)),
+        modifier = modifier.size(size),
+    ) {
+        Image(
+            painter = painterResource(id = R.drawable.ic_rur_brand_logo),
+            contentDescription = "Research Unit of Robotics UNIPOLI",
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .fillMaxSize()
+                .clip(CircleShape),
+        )
+    }
+}
 
 // ============================================================================================
 // SHARED PREMIUM COMPONENTS
@@ -428,13 +454,13 @@ internal fun TactileExtraKeysDock(
                             modifier = Modifier.height(18.dp),
                         )
 
-                        TactileKeycap("agy", height = keyHeight, accentColor = WorkstationColors.AccentCyan) {
+                        TactileKeycap("agy", height = keyHeight, accentColor = WorkstationColors.AccentGold) {
                             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                             onQuickCommand("agy")
                         }
-                        TactileKeycap("claude", height = keyHeight, accentColor = WorkstationColors.AccentEmerald) {
+                        TactileKeycap("opencode", height = keyHeight, accentColor = WorkstationColors.AccentEmerald) {
                             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                            onQuickCommand("claude")
+                            onQuickCommand("opencode")
                         }
                         TactileKeycap("zellij", height = keyHeight) {
                             onQuickCommand("zellij")

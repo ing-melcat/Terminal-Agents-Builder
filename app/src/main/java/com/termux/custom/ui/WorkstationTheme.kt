@@ -13,39 +13,47 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 
 object WorkstationColors {
-    val VoidCanvas = Color(0xFF05070B)
-    val TerminalBackdrop = Color(0xFF04060A)
-    val SurfaceBase = Color(0xFF0B101B)
-    val SurfaceElevated = Color(0xFF111827)
-    val SurfaceInteractive = Color(0xFF1A2438)
-    val SurfaceKeycap = Color(0xFF141C2B)
+    // RUR · Research Unit of Robotics (UNIPOLI) Aerospace Carbon & Gold Design System
+    val VoidCanvas = Color(0xFF060A0F)         // Deep carbon void backdrop
+    val TerminalBackdrop = Color(0xFF05080D)   // High-contrast terminal well
+    val SurfaceBase = Color(0xFF0B1016)        // Exact sampled RUR logo canvas (#0B1016)
+    val SurfaceElevated = Color(0xFF111821)    // Elevated cards & inspector panels
+    val SurfaceInteractive = Color(0xFF18222F) // Active tabs, hover & selection fills
+    val SurfaceKeycap = Color(0xFF141C26)      // Tactile extra-keys & command chips
 
-    val BorderHairline = Color(0x1AE2E8F0) // ~10% translucent slate hairline
-    val BorderStrong = Color(0x3838BDF8)   // ~22% cyan accent stroke
+    val BorderHairline = Color(0x1CF8FAFC)     // ~11% crisp instrument hairline
+    val BorderStrong = Color(0x4DF2BA0B)       // ~30% RUR Gold active stroke
 
-    val AccentCyan = Color(0xFF38BDF8)
-    val AccentCyanWash = Color(0x2238BDF8)
-    val AccentEmerald = Color(0xFF34D399)
+    val AccentGold = Color(0xFFF2BA0B)         // Exact sampled RUR Robotics Gold (#F2BA0B)
+    val AccentGoldWash = Color(0x24F2BA0B)     // ~14% translucent RUR Gold wash
+    val AccentBrass = Color(0xFFD4A017)        // Metallic warm brass secondary accent
+    // Semantic primary accent alias so all primary UI surfaces inherit RUR Gold consistently
+    val AccentCyan = AccentGold
+    val AccentCyanWash = AccentGoldWash
+
+    val AccentEmerald = Color(0xFF34D399)      // Semantic healthy / live PTY / 0600 locked
     val AccentEmeraldWash = Color(0x1F34D399)
-    val AccentAmber = Color(0xFFFBBF24)
-    val AccentAmberWash = Color(0x22FBBF24)
-    val AccentRose = Color(0xFFFB7185)
+    val AccentAmber = Color(0xFFF59E0B)        // Semantic warning / pending action
+    val AccentAmberWash = Color(0x22F59E0B)
+    val AccentRose = Color(0xFFFB7185)         // Semantic error / destructive action
     val AccentRoseWash = Color(0x22FB7185)
 
-    val TextPrimary = Color(0xFFF1F5F9)
-    val TextSecondary = Color(0xFF94A3B8)
-    val TextMuted = Color(0xFF64748B)
+    val TextPrimary = Color(0xFFF8FAFC)        // Crisp instrument white (logo `>_` & typography)
+    val TextSecondary = Color(0xFF9BA6B2)      // Code-comment cool slate from logo backdrop
+    val TextMuted = Color(0xFF647282)          // Subtle circuit slate
 }
 
 val WorkstationDarkColorScheme = darkColorScheme(
-    primary = WorkstationColors.AccentCyan,
+    primary = WorkstationColors.AccentGold,
     onPrimary = WorkstationColors.VoidCanvas,
     primaryContainer = WorkstationColors.SurfaceInteractive,
     onPrimaryContainer = WorkstationColors.TextPrimary,
-    secondary = WorkstationColors.AccentEmerald,
+    secondary = WorkstationColors.AccentBrass,
     onSecondary = WorkstationColors.VoidCanvas,
-    secondaryContainer = WorkstationColors.AccentEmeraldWash,
-    onSecondaryContainer = WorkstationColors.AccentEmerald,
+    secondaryContainer = WorkstationColors.AccentGoldWash,
+    onSecondaryContainer = WorkstationColors.AccentGold,
+    tertiary = WorkstationColors.AccentEmerald,
+    onTertiary = WorkstationColors.VoidCanvas,
     background = WorkstationColors.VoidCanvas,
     onBackground = WorkstationColors.TextPrimary,
     surface = WorkstationColors.SurfaceBase,

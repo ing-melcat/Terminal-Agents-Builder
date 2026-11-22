@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="workstation_void_canvas">#FF05070B</color>
+    <color name="workstation_void_canvas">#FF060A0F</color>
+    <color name="ic_launcher_rur_bg">#FF0B1016</color>
+    <color name="rur_gold">#FFF2BA0B</color>
 </resources>

@@ -115,18 +115,13 @@ internal fun PhonePortraitLayout(
                         .height(50.dp)
                         .padding(horizontal = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Icon(
-                        imageVector = WorkstationIcons.TerminalPrompt,
-                        contentDescription = null,
-                        tint = WorkstationColors.AccentCyan,
-                        modifier = Modifier.size(20.dp),
-                    )
+                    RurBrandBadge(size = 26.dp)
                     Text(
-                        text = "Terminal Agents",
+                        text = "RUR Agents",
                         color = WorkstationColors.TextPrimary,
-                        fontSize = 15.sp,
+                        fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                         softWrap = false,
@@ -502,12 +497,7 @@ internal fun TabletPortraitLayout(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Icon(
-                        imageVector = WorkstationIcons.TerminalPrompt,
-                        contentDescription = null,
-                        tint = WorkstationColors.AccentCyan,
-                        modifier = Modifier.size(20.dp),
-                    )
+                    RurBrandBadge(size = 26.dp)
                     Text(
                         text = "Terminal Agents",
                         color = WorkstationColors.TextPrimary,
@@ -671,14 +661,9 @@ internal fun TabletLandscapeLayout(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Icon(
-                        imageVector = WorkstationIcons.TerminalPrompt,
-                        contentDescription = null,
-                        tint = WorkstationColors.AccentCyan,
-                        modifier = Modifier.size(20.dp),
-                    )
+                    RurBrandBadge(size = 26.dp)
                     Text(
-                        text = "Agents",
+                        text = "RUR Agents",
                         color = WorkstationColors.TextPrimary,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,

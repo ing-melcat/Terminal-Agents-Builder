@@ -9,11 +9,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -46,10 +50,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.termux.custom.agents.CodingAgentsState
+import com.termux.custom.agents.CodingBudgetTier
+import com.termux.custom.agents.CodingModelCatalog
+import com.termux.custom.agents.CodingModelPreset
+import com.termux.custom.agents.CodingProvider
 import com.termux.custom.security.OAuthTokenState
 
 // ============================================================================================
-// DIALOGS: SEARCHABLE COMMAND PALETTE & SECURE PASSWORD-MASKED VAULT DIALOG
+// DIALOGS: SEARCHABLE COMMAND PALETTE, CODING MODELS VAULT & SECURE OAUTH DIALOG
 // ============================================================================================
 private data class PaletteAction(
     val title: String,
@@ -67,6 +76,7 @@ internal fun SearchableCommandPaletteDialog(
     onNewPtySession: () -> Unit,
     onToggleZen: () -> Unit,
     onOpenTokenVault: () -> Unit,
+    onOpenCodingModelsVault: () -> Unit,
     onCheckAppUpdate: () -> Unit,
     onOpenTutorial: () -> Unit,
 ) {
@@ -75,18 +85,21 @@ internal fun SearchableCommandPaletteDialog(
     val actions = remember(isZenMode) {
         listOf(
             PaletteAction("agy", "Launch official Google Antigravity CLI (native arm64)", "", "antigravity cli agent", { onExecuteShellCommand("agy") }),
+            PaletteAction("opencode", "Launch native Bionic OpenCode v2 coding agent", "", "opencode code coder qwen devstral", { onExecuteShellCommand("opencode") }),
+            PaletteAction("Coding Models & Vault (0600)", "Select code-only models (Free / Eco / Pro / Ollama) & API keys", "", "models openrouter mistral ollama qwen coder codestral codex", onOpenCodingModelsVault),
+            PaletteAction("workstation install-opencode", "Install native Bionic OpenCode v2 via signed APT repo", "", "install opencode bionic apt", { onExecuteShellCommand("workstation install-opencode") }),
             PaletteAction("workstation setup", "Install native Antigravity CLI (agy) + glibc + toolchain", "", "setup install agy glibc", { onExecuteShellCommand("workstation setup") }),
-            PaletteAction("Workstation Doctor", "Verify agy, glibc, TLS, DNS, skills & 0600 vault", "", "doctor diagnose toolchain agy", { onExecuteShellCommand("workstation doctor") }),
+            PaletteAction("Workstation Doctor", "Verify agy, opencode, glibc, TLS, DNS, skills & 0600 vaults", "", "doctor diagnose toolchain agy opencode", { onExecuteShellCommand("workstation doctor") }),
             PaletteAction("agy update", "Self-update native Antigravity CLI binary", "", "update upgrade agy", { onExecuteShellCommand("agy update") }),
-            PaletteAction("claude", "Launch Claude CLI interactive session", "", "", { onExecuteShellCommand("claude") }),
             PaletteAction("zellij", "Start Zellij terminal multiplexer", "", "", { onExecuteShellCommand("zellij") }),
             PaletteAction("New Terminal Session", "Spawn an isolated native PTY shell tab", "^⇧T", "", onNewPtySession),
             PaletteAction(if (isZenMode) "Exit Zen Mode" else "Enter Zen Mode", "Expand terminal canvas across full display", "^⇧B", "", onToggleZen),
             PaletteAction("Clean Caches (melcat-gc)", "Purge apt/pip/npm caches and zstd-compress old logs", "", "", { onExecuteShellCommand("melcat-gc") }),
             PaletteAction("Portable Snapshot", "Create secret-free tar.zst workspace archive", "", "", { onExecuteShellCommand("melcat-gc --snapshot") }),
-            PaletteAction("OAuth Credentials Vault", "Provision or rotate 0600 OAuth token", "", "", onOpenTokenVault),
+            PaletteAction("Antigravity OAuth Vault", "Provision or rotate 0600 Antigravity OAuth token", "", "oauth token vault", onOpenTokenVault),
             PaletteAction("Check for App Update (OTA)", "Query GitHub Releases and verify SHA-256", "", "", onCheckAppUpdate),
             PaletteAction("Interactive Tutorial & First Steps", "Guided workstation onboarding & setup checklist", "", "tutorial help primeros pasos guide", onOpenTutorial),
+            PaletteAction("claude (optional)", "Launch Claude CLI if installed with Anthropic account", "", "claude anthropic", { onExecuteShellCommand("claude") }),
         )
     }
 
@@ -338,7 +351,7 @@ internal fun NewWorkspaceDialog(
     onDismiss: () -> Unit,
     onConfirm: (title: String, agentType: String, summary: String) -> Unit,
 ) {
-    val agentTypes = remember { listOf("agy", "claude", "zellij", "sh") }
+    val agentTypes = remember { listOf("agy", "opencode", "zellij", "sh", "claude") }
     var title by rememberSaveable { mutableStateOf("") }
     var selectedAgentType by rememberSaveable { mutableStateOf("agy") }
     var summary by rememberSaveable { mutableStateOf("") }
@@ -402,8 +415,8 @@ internal fun NewWorkspaceDialog(
                                     )
                                 },
                                 colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = WorkstationColors.AccentCyanWash,
-                                    selectedLabelColor = WorkstationColors.AccentCyan,
+                                    selectedContainerColor = WorkstationColors.AccentGoldWash,
+                                    selectedLabelColor = WorkstationColors.AccentGold,
                                     containerColor = WorkstationColors.SurfaceKeycap,
                                     labelColor = WorkstationColors.TextSecondary,
                                 ),
@@ -514,4 +527,377 @@ internal fun ImportDeltasDialog(
             }
         },
     )
+}
+
+@Composable
+internal fun CodingModelsVaultDialog(
+    state: CodingAgentsState,
+    errorText: String?,
+    onDismiss: () -> Unit,
+    onSelectModel: (CodingModelPreset) -> Unit,
+    onSaveApiKey: (CodingProvider, String) -> Unit,
+    onClearApiKey: (CodingProvider) -> Unit,
+    onSaveOllamaUrl: (String) -> Unit,
+    onClearOllamaUrl: () -> Unit,
+    onLaunchOrInstallOpenCode: () -> Unit,
+) {
+    val initialProvider = state.activePreset?.provider ?: CodingProvider.OPENCODE_FREE
+    var selectedProviderName by rememberSaveable { mutableStateOf(initialProvider.name) }
+    val selectedProvider = CodingProvider.entries.firstOrNull { it.name == selectedProviderName }
+        ?: CodingProvider.OPENCODE_FREE
+
+    var apiKeyInput by rememberSaveable(selectedProviderName) { mutableStateOf("") }
+    var ollamaUrlInput by rememberSaveable(state.ollamaBaseUrl) {
+        mutableStateOf(state.ollamaBaseUrl ?: "http://192.168.1.50:11434/v1")
+    }
+
+    val providerPresets = remember(selectedProvider) {
+        CodingModelCatalog.presetsFor(selectedProvider)
+    }
+    val providerStatus = state.providerStatuses[selectedProvider]
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
+    ) {
+        androidx.compose.foundation.layout.Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .imePadding()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = WorkstationColors.SurfaceElevated,
+                border = BorderStroke(1.dp, WorkstationColors.BorderStrong),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 580.dp)
+                    .heightIn(max = 640.dp),
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Coding Models & Vault (0600)",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = WorkstationColors.TextPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = "Modelos enfocados a código (gratis, económicos, pro y locales)",
+                                fontSize = 11.sp,
+                                color = WorkstationColors.TextSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        TextButton(onClick = onDismiss) {
+                            Text("Close", fontSize = 12.sp, color = WorkstationColors.TextSecondary)
+                        }
+                    }
+
+                    // Provider selector tabs
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        CodingProvider.entries.forEach { provider ->
+                            val selected = provider == selectedProvider
+                            val configured = state.isProviderReady(provider)
+                            val labelText = if (provider != CodingProvider.OPENCODE_FREE && configured) {
+                                "${provider.displayName} ✓"
+                            } else {
+                                provider.displayName
+                            }
+                            FilterChip(
+                                selected = selected,
+                                onClick = { selectedProviderName = provider.name },
+                                label = {
+                                    Text(
+                                        text = labelText,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 11.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = WorkstationColors.AccentGoldWash,
+                                    selectedLabelColor = WorkstationColors.AccentGold,
+                                    containerColor = WorkstationColors.SurfaceKeycap,
+                                    labelColor = WorkstationColors.TextSecondary,
+                                ),
+                                border = FilterChipDefaults.filterChipBorder(
+                                    enabled = true,
+                                    selected = selected,
+                                    borderColor = WorkstationColors.BorderHairline,
+                                    selectedBorderColor = WorkstationColors.BorderStrong,
+                                ),
+                            )
+                        }
+                    }
+
+                    // Unified scrolling body (credential box + model presets) so IME / Phone Landscape never collapses to 0dp
+                    LazyColumn(
+                        modifier = Modifier.weight(1f, fill = false),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        item(key = "provider_setup_${selectedProvider.name}") {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = WorkstationColors.SurfaceKeycap,
+                                border = BorderStroke(1.dp, WorkstationColors.BorderHairline),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    Text(
+                                        text = selectedProvider.subtitle,
+                                        fontSize = 11.sp,
+                                        color = WorkstationColors.TextSecondary,
+                                    )
+
+                                    when {
+                                        selectedProvider == CodingProvider.OPENCODE_FREE -> {
+                                            Text(
+                                                text = "Sin API key: elige un modelo gratis abajo y abre `opencode`. Los modelos gratuitos de OpenCode Console rotan periódicamente (`/models` muestra la lista en vivo).",
+                                                fontSize = 11.sp,
+                                                color = WorkstationColors.AccentEmerald,
+                                            )
+                                        }
+
+                                        selectedProvider.requiresApiKey -> {
+                                            if (providerStatus?.isConfigured == true) {
+                                                Text(
+                                                    text = "Vault activo: ${providerStatus.preview} · mode ${providerStatus.posixModeOctal} ({file:...}, sin secretos en opencode.json)",
+                                                    fontFamily = FontFamily.Monospace,
+                                                    fontSize = 10.sp,
+                                                    color = WorkstationColors.AccentEmerald,
+                                                )
+                                            }
+                                            OutlinedTextField(
+                                                value = apiKeyInput,
+                                                onValueChange = { apiKeyInput = it },
+                                                label = {
+                                                    Text(
+                                                        "${selectedProvider.envVar ?: "API Key"} (0600)",
+                                                        fontSize = 11.sp,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                    )
+                                                },
+                                                singleLine = true,
+                                                visualTransformation = PasswordVisualTransformation(),
+                                                keyboardOptions = KeyboardOptions(
+                                                    autoCorrectEnabled = false,
+                                                    keyboardType = KeyboardType.Password,
+                                                ),
+                                                modifier = Modifier.fillMaxWidth(),
+                                            )
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                            ) {
+                                                Button(
+                                                    onClick = {
+                                                        onSaveApiKey(selectedProvider, apiKeyInput)
+                                                        apiKeyInput = ""
+                                                    },
+                                                    enabled = apiKeyInput.trim().length >= 8,
+                                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                                                    modifier = Modifier.weight(1f),
+                                                ) {
+                                                    Text("Lock 0600", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                }
+                                                if (providerStatus?.isConfigured == true) {
+                                                    TextButton(
+                                                        onClick = { onClearApiKey(selectedProvider) },
+                                                        colors = ButtonDefaults.textButtonColors(contentColor = WorkstationColors.AccentRose),
+                                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                                                    ) {
+                                                        Text("Clear", fontSize = 11.sp, maxLines = 1)
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        selectedProvider.requiresBaseUrl -> {
+                                            if (providerStatus?.isConfigured == true) {
+                                                Text(
+                                                    text = "Endpoint Ollama v2 activo: ${providerStatus.preview}",
+                                                    fontFamily = FontFamily.Monospace,
+                                                    fontSize = 10.sp,
+                                                    color = WorkstationColors.AccentEmerald,
+                                                )
+                                            }
+                                            OutlinedTextField(
+                                                value = ollamaUrlInput,
+                                                onValueChange = { ollamaUrlInput = it },
+                                                label = {
+                                                    Text(
+                                                        "Ollama URL (LAN o 127.0.0.1)",
+                                                        fontSize = 11.sp,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                    )
+                                                },
+                                                singleLine = true,
+                                                modifier = Modifier.fillMaxWidth(),
+                                            )
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                            ) {
+                                                Button(
+                                                    onClick = { onSaveOllamaUrl(ollamaUrlInput) },
+                                                    enabled = ollamaUrlInput.trim().startsWith("http"),
+                                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                                                    modifier = Modifier.weight(1f),
+                                                ) {
+                                                    Text("Save Endpoint", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                }
+                                                if (providerStatus?.isConfigured == true) {
+                                                    TextButton(
+                                                        onClick = onClearOllamaUrl,
+                                                        colors = ButtonDefaults.textButtonColors(contentColor = WorkstationColors.AccentRose),
+                                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                                                    ) {
+                                                        Text("Clear", fontSize = 11.sp, maxLines = 1)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if (!errorText.isNullOrBlank()) {
+                                        Text(
+                                            text = errorText,
+                                            fontSize = 11.sp,
+                                            color = WorkstationColors.AccentRose,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        items(providerPresets, key = { it.id }) { preset ->
+                            val isActive = state.activeOpenCodeModel == preset.id
+                            val tierColor = when (preset.tier) {
+                                CodingBudgetTier.FREE, CodingBudgetTier.LOCAL -> WorkstationColors.AccentEmerald
+                                CodingBudgetTier.BUDGET -> WorkstationColors.AccentGold
+                                CodingBudgetTier.PRO -> WorkstationColors.AccentAmber
+                            }
+                            val tierWash = when (preset.tier) {
+                                CodingBudgetTier.FREE, CodingBudgetTier.LOCAL -> WorkstationColors.AccentEmeraldWash
+                                CodingBudgetTier.BUDGET -> WorkstationColors.AccentGoldWash
+                                CodingBudgetTier.PRO -> WorkstationColors.AccentAmberWash
+                            }
+
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isActive) WorkstationColors.SurfaceInteractive else WorkstationColors.SurfaceKeycap,
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isActive) WorkstationColors.AccentGold else WorkstationColors.BorderHairline,
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onSelectModel(preset) },
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 9.dp),
+                                    verticalArrangement = Arrangement.spacedBy(3.dp),
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text(
+                                            text = if (isActive) "★ ${preset.displayName}" else preset.displayName,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = if (isActive) WorkstationColors.AccentGold else WorkstationColors.TextPrimary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f),
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Surface(
+                                            shape = RoundedCornerShape(5.dp),
+                                            color = tierWash,
+                                        ) {
+                                            Text(
+                                                text = preset.tier.badge,
+                                                fontFamily = FontFamily.Monospace,
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = tierColor,
+                                                maxLines = 1,
+                                                softWrap = false,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                            )
+                                        }
+                                    }
+                                    Text(
+                                        text = "${preset.contextWindow} · ${preset.priceLabel} · ${preset.specialty}",
+                                        fontSize = 11.sp,
+                                        color = WorkstationColors.TextSecondary,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Text(
+                                        text = preset.id,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 9.sp,
+                                        color = WorkstationColors.TextMuted,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(thickness = 1.dp, color = WorkstationColors.BorderHairline)
+
+                    Button(
+                        onClick = onLaunchOrInstallOpenCode,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = WorkstationColors.AccentGold,
+                            contentColor = WorkstationColors.VoidCanvas,
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            text = if (state.opencodeInstalled) "Launch OpenCode v2" else "Install Native OpenCode v2",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+        }
+    }
 }
