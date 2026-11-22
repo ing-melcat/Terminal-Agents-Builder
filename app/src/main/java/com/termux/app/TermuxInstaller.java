@@ -60,6 +60,8 @@ import static com.termux.shared.termux.TermuxConstants.TERMUX_STAGING_PREFIX_DIR
 public final class TermuxInstaller {
 
     private static final String LOG_TAG = "TermuxInstaller";
+    private static final java.util.concurrent.atomic.AtomicBoolean BOOTSTRAP_INSTALL_IN_PROGRESS =
+        new java.util.concurrent.atomic.AtomicBoolean(false);
 
     /** Performs bootstrap setup if necessary. */
     public static void setupBootstrapIfNeeded(final Activity activity, final Runnable whenDone) {
@@ -113,6 +115,11 @@ public final class TermuxInstaller {
             }
         } else if (FileUtils.fileExists(TERMUX_PREFIX_DIR_PATH, false)) {
             Logger.logInfo(LOG_TAG, "The termux prefix directory \"" + TERMUX_PREFIX_DIR_PATH + "\" does not exist but another file exists at its destination.");
+        }
+
+        if (!BOOTSTRAP_INSTALL_IN_PROGRESS.compareAndSet(false, true)) {
+            Logger.logInfo(LOG_TAG, "Bootstrap installation already in progress; ignoring duplicate trigger.");
+            return;
         }
 
         final ProgressDialog progress = ProgressDialog.show(activity, null, activity.getString(R.string.bootstrap_installer_body), true, false);
@@ -230,6 +237,7 @@ public final class TermuxInstaller {
                     showBootstrapErrorDialog(activity, whenDone, Logger.getStackTracesMarkdownString(null, Logger.getStackTracesStringArray(e)));
 
                 } finally {
+                    BOOTSTRAP_INSTALL_IN_PROGRESS.set(false);
                     activity.runOnUiThread(() -> {
                         try {
                             progress.dismiss();

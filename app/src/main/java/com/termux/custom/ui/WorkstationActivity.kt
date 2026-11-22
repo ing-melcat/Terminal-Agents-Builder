@@ -168,14 +168,20 @@ class WorkstationActivity : ComponentActivity(), ServiceConnection {
         }
     }
 
+    private var isBootstrapInstalling = false
+
     private fun ensureBootstrapInstalled() {
         if (CustomBootstrapProvisioner.isBootstrapInstalled()) {
+            isBootstrapInstalling = false
             bootstrapReady = true
             // Ensure upgraded CLI scripts (v4: agy login/doctor/upgrade) are provisioned on updates.
             CustomBootstrapProvisioner.runPostBootstrapProvisioningAsync(this)
             return
         }
+        if (isBootstrapInstalling) return
+        isBootstrapInstalling = true
         TermuxInstaller.setupBootstrapIfNeeded(this) {
+            isBootstrapInstalling = false
             bootstrapReady = CustomBootstrapProvisioner.isBootstrapInstalled()
         }
     }
