@@ -7,6 +7,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,16 +32,13 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
-import androidx.compose.material3.NavigationRail
-import androidx.compose.material3.NavigationRailItem
-import androidx.compose.material3.NavigationRailItemDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.VerticalDivider
@@ -226,45 +224,61 @@ internal fun PhonePortraitLayout(
                     applyBottomInsets = false,
                 )
                 HorizontalDivider(thickness = 1.dp, color = WorkstationColors.BorderHairline)
-                NavigationBar(
-                    containerColor = WorkstationColors.SurfaceBase,
-                    tonalElevation = 0.dp,
-                    windowInsets = WindowInsets.navigationBars
-                        .union(WindowInsets.displayCutout)
-                        .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal),
+                Surface(
+                    color = WorkstationColors.SurfaceBase,
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
-                    PrimaryTab.entries.forEach { tab ->
-                        val selected = primaryTab == tab
-                        NavigationBarItem(
-                            selected = selected,
-                            onClick = {
-                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                onSelectTab(tab)
-                            },
-                            icon = {
-                                Icon(
-                                    imageVector = tabIcon(tab),
-                                    contentDescription = tab.label,
-                                    modifier = Modifier.size(20.dp),
-                                )
-                            },
-                            label = {
-                                Text(
-                                    text = tab.label,
-                                    fontSize = 11.sp,
-                                    maxLines = 1,
-                                    softWrap = false,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            },
-                            colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = WorkstationColors.AccentCyan,
-                                selectedTextColor = WorkstationColors.AccentCyan,
-                                unselectedIconColor = WorkstationColors.TextSecondary,
-                                unselectedTextColor = WorkstationColors.TextSecondary,
-                                indicatorColor = WorkstationColors.AccentCyanWash,
-                            ),
-                        )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .windowInsetsPadding(
+                                WindowInsets.navigationBars
+                                    .union(WindowInsets.displayCutout)
+                                    .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal)
+                            )
+                            .height(58.dp)
+                            .padding(horizontal = 4.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        PrimaryTab.entries.forEach { tab ->
+                            val selected = primaryTab == tab
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (selected) WorkstationColors.AccentCyanWash else androidx.compose.ui.graphics.Color.Transparent,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxHeight()
+                                    .clickable {
+                                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        onSelectTab(tab)
+                                    },
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(horizontal = 2.dp, vertical = 4.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.Center,
+                                ) {
+                                    Icon(
+                                        imageVector = tabIcon(tab),
+                                        contentDescription = tab.label,
+                                        tint = if (selected) WorkstationColors.AccentCyan else WorkstationColors.TextSecondary,
+                                        modifier = Modifier.size(19.dp),
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = tab.label,
+                                        fontSize = 10.sp,
+                                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                        color = if (selected) WorkstationColors.AccentCyan else WorkstationColors.TextSecondary,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -273,7 +287,7 @@ internal fun PhonePortraitLayout(
 }
 
 // ============================================================================================
-// LAYOUT 2: PHONE LANDSCAPE (height < 500dp, width > height — Left NavigationRail + 38dp Top)
+// LAYOUT 2: PHONE LANDSCAPE (height < 500dp, width > height — Left Scrollable Rail + 38dp Top)
 // ============================================================================================
 @Composable
 internal fun PhoneLandscapeLayout(
@@ -302,41 +316,47 @@ internal fun PhoneLandscapeLayout(
         .only(WindowInsetsSides.Bottom)
 
     Row(modifier = Modifier.fillMaxSize()) {
-        // Slim Left NavigationRail inside full-bleed SurfaceBase
+        // Slim scrollable 52dp Left Icon Rail (fits all 5 tabs inside 360dp landscape height!)
         Surface(
             color = WorkstationColors.SurfaceBase,
             modifier = Modifier.fillMaxHeight(),
         ) {
-            NavigationRail(
-                containerColor = WorkstationColors.SurfaceBase,
-                windowInsets = WindowInsets.statusBars
-                    .union(WindowInsets.navigationBars)
-                    .union(WindowInsets.displayCutout)
-                    .only(WindowInsetsSides.Start + WindowInsetsSides.Vertical),
-                modifier = Modifier.fillMaxHeight(),
+            Column(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .windowInsetsPadding(
+                        WindowInsets.statusBars
+                            .union(WindowInsets.navigationBars)
+                            .union(WindowInsets.displayCutout)
+                            .only(WindowInsetsSides.Start + WindowInsetsSides.Vertical)
+                    )
+                    .width(52.dp)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 4.dp, vertical = 6.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                Spacer(modifier = Modifier.height(6.dp))
                 PrimaryTab.entries.forEach { tab ->
-                    NavigationRailItem(
-                        selected = primaryTab == tab,
-                        onClick = {
-                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            onSelectTab(tab)
-                        },
-                        icon = {
+                    val selected = primaryTab == tab
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (selected) WorkstationColors.AccentCyanWash else androidx.compose.ui.graphics.Color.Transparent,
+                        modifier = Modifier
+                            .size(44.dp)
+                            .clickable {
+                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                onSelectTab(tab)
+                            },
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
                             Icon(
                                 imageVector = tabIcon(tab),
                                 contentDescription = tab.label,
+                                tint = if (selected) WorkstationColors.AccentCyan else WorkstationColors.TextSecondary,
                                 modifier = Modifier.size(20.dp),
                             )
-                        },
-                        alwaysShowLabel = false,
-                        colors = NavigationRailItemDefaults.colors(
-                            selectedIconColor = WorkstationColors.AccentCyan,
-                            unselectedIconColor = WorkstationColors.TextSecondary,
-                            indicatorColor = WorkstationColors.AccentCyanWash,
-                        ),
-                    )
+                        }
+                    }
                 }
             }
         }
@@ -786,6 +806,7 @@ internal fun TabletLandscapeLayout(
 
 private fun PrimaryTab.toInspectorTab(): InspectorTab = when (this) {
     PrimaryTab.AGENTS -> InspectorTab.AGENTS
+    PrimaryTab.SSH -> InspectorTab.SSH
     PrimaryTab.SHIELD -> InspectorTab.SHIELD
     PrimaryTab.STORAGE -> InspectorTab.STORAGE
     PrimaryTab.TERMINAL -> InspectorTab.AGENTS

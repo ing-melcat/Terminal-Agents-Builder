@@ -96,6 +96,9 @@ class TermuxViewSurfaceBridge(
     val isSessionAttached: Boolean
         get() = _isSessionAttached
 
+    val attachedSessionHandle: String?
+        get() = currentSession?.mHandle
+
     val terminalView: TerminalView = TerminalView(context, null).apply {
         isFocusable = true
         isFocusableInTouchMode = true
@@ -106,6 +109,10 @@ class TermuxViewSurfaceBridge(
     }
 
     override fun attachSession(session: TerminalSession) {
+        if (currentSession === session && terminalView.currentSession === session) {
+            terminalView.onScreenUpdated()
+            return
+        }
         currentSession = session
         _isSessionAttached = true
         val changed = terminalView.attachSession(session)

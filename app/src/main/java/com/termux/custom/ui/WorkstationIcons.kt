@@ -210,4 +210,36 @@ object WorkstationIcons {
             lineTo(15.8f, 9.5f)
         }
     }
+
+    val SshNodes: ImageVector by lazy {
+        strokedIcon("SshNodes") {
+            // Top server rack box
+            moveTo(4.5f, 4.5f)
+            lineTo(19.5f, 4.5f)
+            quadTo(20.5f, 4.5f, 20.5f, 5.5f)
+            lineTo(20.5f, 9.5f)
+            quadTo(20.5f, 10.5f, 19.5f, 10.5f)
+            lineTo(4.5f, 10.5f)
+            quadTo(3.5f, 10.5f, 3.5f, 9.5f)
+            lineTo(3.5f, 5.5f)
+            quadTo(3.5f, 4.5f, 4.5f, 4.5f)
+            close()
+            moveTo(7f, 7.5f)
+            lineTo(7.5f, 7.5f)
+            moveTo(10.5f, 7.5f)
+            lineTo(16.5f, 7.5f)
+            // Vertical network link + bottom node bar
+            moveTo(12f, 10.5f)
+            lineTo(12f, 16.5f)
+            moveTo(5.5f, 16.5f)
+            lineTo(18.5f, 16.5f)
+            // Left & right endpoint ticks
+            moveTo(5.5f, 16.5f)
+            lineTo(5.5f, 19.5f)
+            moveTo(12f, 16.5f)
+            lineTo(12f, 19.5f)
+            moveTo(18.5f, 16.5f)
+            lineTo(18.5f, 19.5f)
+        }
+    }
 }

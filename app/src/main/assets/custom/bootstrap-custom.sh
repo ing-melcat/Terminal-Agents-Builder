@@ -6,7 +6,7 @@ set -eu
 
 PREFIX="/data/data/com.termux/files/usr"
 HOME_DIR="/data/data/com.termux/files/home"
-STAMP_FILE="$HOME_DIR/.config/melcat/.bootstrap_provisioned_v8"
+STAMP_FILE="$HOME_DIR/.config/melcat/.bootstrap_provisioned_v9"
 
 export PATH="$PREFIX/bin:$PATH"
 export HOME="$HOME_DIR"
@@ -122,9 +122,14 @@ if [ "${1:-}" = "--snapshot" ]; then
         echo "[storage-gc] Nothing to snapshot yet."
     elif command -v zstd >/dev/null 2>&1; then
         OUT="$SNAP_DIR/agent-workspace-$TS.tar.zst"
+        TMP_TAR="$OUT.tmp"
+        umask 077
         # shellcheck disable=SC2086
         if tar --exclude='*oauth-token*' --exclude='*oauth_creds.json*' \
             --exclude='*credentials*' --exclude='*auth.json*' \
+            --exclude='.ssh*' \
+            --exclude='.config/melcat/ssh-devices.json*' \
+            --exclude='*id_ed25519*' --exclude='*id_rsa*' --exclude='*.pem' \
             --exclude='.gemini/antigravity-cli/antigravity-oauth-token' \
             --exclude='.config/antigravity/antigravity-oauth-token' \
             --exclude='.gemini/antigravity-oauth-token' \
@@ -135,18 +140,22 @@ if [ "${1:-}" = "--snapshot" ]; then
             --exclude='*providers.env*' \
             --exclude='.local/share/opencode/opencode.db*' \
             --exclude='.local/share/opencode/auth.json*' \
-            -cf - -C "$HOME_DIR" $SOURCES 2>/dev/null | zstd -T0 -q -o "$OUT"; then
+            -cf "$TMP_TAR" -C "$HOME_DIR" $SOURCES 2>/dev/null && zstd -T0 -q --rm "$TMP_TAR" -o "$OUT"; then
             chmod 0600 "$OUT" 2>/dev/null || true
             echo "[storage-gc] Portable zstd snapshot written (secrets excluded): $OUT"
         else
-            rm -f "$OUT"
+            rm -f "$TMP_TAR" "$OUT"
             echo "[storage-gc] ERROR: zstd snapshot failed." >&2
         fi
     else
         OUT_GZ="$SNAP_DIR/agent-workspace-$TS.tar.gz"
+        umask 077
         # shellcheck disable=SC2086
         if tar --exclude='*oauth-token*' --exclude='*oauth_creds.json*' \
             --exclude='*credentials*' --exclude='*auth.json*' \
+            --exclude='.ssh*' \
+            --exclude='.config/melcat/ssh-devices.json*' \
+            --exclude='*id_ed25519*' --exclude='*id_rsa*' --exclude='*.pem' \
             --exclude='.gemini/antigravity-cli/antigravity-oauth-token' \
             --exclude='.config/antigravity/antigravity-oauth-token' \
             --exclude='.gemini/antigravity-oauth-token' \
@@ -298,6 +307,22 @@ CLIEOF
     fi
 }
 
+install_openssh() {
+    echo "[workstation] Installing native Termux OpenSSH client (ssh, ssh-keygen, scp)..."
+    export DEBIAN_FRONTEND=noninteractive
+    pkg update -y
+    pkg install -y -o Dpkg::Options::=--force-confold openssh
+    mkdir -p "$HOME_DIR/.ssh"
+    chmod 0700 "$HOME_DIR/.ssh" 2>/dev/null || true
+    if [ -x "$PREFIX/bin/ssh" ]; then
+        echo "[workstation] OpenSSH installed: $("$PREFIX/bin/ssh" -V 2>&1 || echo 'ready')"
+        echo "[workstation] Open the SSH panel (workstation ui ssh) to connect via Direct LAN or Tailscale."
+    else
+        echo "[workstation] ERROR: OpenSSH binary was not installed cleanly." >&2
+        return 1
+    fi
+}
+
 print_help() {
     echo "============================================================"
     echo " Terminal Agents Builder (RUR) — Workstation Controller"
@@ -312,6 +337,11 @@ print_help() {
     else
         echo " OpenCode v2: NOT INSTALLED (run 'workstation install-opencode')"
     fi
+    if [ -x "$PREFIX/bin/ssh" ]; then
+        echo " OpenSSH    : INSTALLED ($("$PREFIX/bin/ssh" -V 2>&1 | head -n 1 || echo 'native'))"
+    else
+        echo " OpenSSH    : NOT INSTALLED (run 'workstation install-ssh')"
+    fi
     echo " Skills Dir : $SKILLS_DIR ($(ls -1 "$SKILLS_DIR" 2>/dev/null | tr '\n' ' '))"
     if TF="$(find_active_token 2>/dev/null)"; then
         echo " OAuth Vault: ACTIVE ($TF, mode 0$(stat -c '%a' "$TF" 2>/dev/null || echo '600'))"
@@ -325,11 +355,12 @@ print_help() {
     echo "   workstation setup           -> Install native agy + developer toolchain"
     echo "   workstation install-agy     -> Install/reinstall native Antigravity CLI"
     echo "   workstation install-opencode-> Install/upgrade native Bionic OpenCode v2"
+    echo "   workstation install-ssh     -> Install native OpenSSH client (LAN & Tailscale)"
     echo "   workstation upgrade         -> Upgrade Termux packages (incl. opencode) + agy"
-    echo "   workstation doctor          -> Diagnose agy, opencode, glibc, TLS, skills & vaults"
+    echo "   workstation doctor          -> Diagnose agy, opencode, ssh, glibc, TLS & vaults"
     echo "   workstation skills          -> List unified agy/opencode/claude skills"
     echo "   workstation token           -> Check Antigravity OAuth & Coding Vault 0600"
-    echo "   workstation ui              -> Bring 120Hz Workstation UI to front"
+    echo "   workstation ui [ssh|agents] -> Bring 120Hz Workstation UI (or panel) to front"
     echo "   melcat-gc                   -> Clean caches & create zstd backups"
     echo "============================================================"
 }
@@ -340,9 +371,9 @@ case "${1:-ui}" in
         ;;
     setup|--setup)
         install_real_agy
-        echo "[workstation] Installing developer toolchain (git, zstd, zsh, tmux, ripgrep, jq)..."
+        echo "[workstation] Installing developer toolchain (git, openssh, zstd, zsh, tmux, ripgrep, jq)..."
         export DEBIAN_FRONTEND=noninteractive
-        pkg install -y -o Dpkg::Options::=--force-confold git zstd zsh tmux ripgrep jq
+        pkg install -y -o Dpkg::Options::=--force-confold git openssh zstd zsh tmux ripgrep jq
         echo "[workstation] Ready! Run 'agy' for Antigravity CLI, or 'workstation install-opencode' for OpenCode v2."
         ;;
     install-agy|reinstall-agy)
@@ -350,6 +381,9 @@ case "${1:-ui}" in
         ;;
     install-opencode|reinstall-opencode)
         install_native_opencode
+        ;;
+    install-ssh|install-openssh)
+        install_openssh
         ;;
     upgrade|--upgrade)
         echo "[workstation] Upgrading Termux packages (including OpenCode if installed)..."
@@ -396,6 +430,12 @@ case "${1:-ui}" in
             echo "  [ok]      opencode ($OCVER, native bionic)"
         else
             echo "  [opt]     opencode (OpenCode v2) -> run 'workstation install-opencode'"
+        fi
+        if [ -x "$PREFIX/bin/ssh" ]; then
+            SSHVER="$("$PREFIX/bin/ssh" -V 2>&1 | head -n 1 || echo 'ready')"
+            echo "  [ok]      openssh ($SSHVER)"
+        else
+            echo "  [opt]     openssh (SSH & Tailscale) -> run 'workstation install-ssh'"
         fi
         if [ -s "$HOME_DIR/.config/opencode/cli.json" ]; then
             echo "  [ok]      opencode cli.json (Tab agent.cycle keybind)"

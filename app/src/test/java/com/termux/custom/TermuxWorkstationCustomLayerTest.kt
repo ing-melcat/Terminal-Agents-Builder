@@ -336,5 +336,275 @@ class TermuxWorkstationCustomLayerTest {
         )
         assertEquals("opencode", ocRecord.toSafeLaunchCommand())
     }
+
+    @Test
+    fun `SshDevicesManager validates hosts, detects Tailscale ranges, parses ssh_config, probes reachability, and builds safe execve argv`() = runTest(testDispatcher) {
+        // 1. Tailscale CGNAT (100.64.0.0/10) & MagicDNS (*.ts.net) detection
+        assertTrue(com.termux.custom.ssh.SshDevicesManager.looksLikeTailscaleHost("100.64.0.1"))
+        assertTrue(com.termux.custom.ssh.SshDevicesManager.looksLikeTailscaleHost("100.100.100.100"))
+        assertTrue(com.termux.custom.ssh.SshDevicesManager.looksLikeTailscaleHost("100.127.255.254"))
+        assertTrue(com.termux.custom.ssh.SshDevicesManager.looksLikeTailscaleHost("jetson-orin.tail1234.ts.net"))
+        assertFalse(com.termux.custom.ssh.SshDevicesManager.looksLikeTailscaleHost("100.63.255.255"))
+        assertFalse(com.termux.custom.ssh.SshDevicesManager.looksLikeTailscaleHost("100.128.0.1"))
+        assertFalse(com.termux.custom.ssh.SshDevicesManager.looksLikeTailscaleHost("192.168.1.40"))
+        assertFalse(com.termux.custom.ssh.SshDevicesManager.looksLikeTailscaleHost("example.com"))
+
+        val tempRoot = java.nio.file.Files.createTempDirectory("melcat-ssh-test").toFile()
+        try {
+            val prefixDir = java.io.File(tempRoot, "usr").apply { mkdirs() }
+            val binDir = java.io.File(prefixDir, "bin").apply { mkdirs() }
+            java.io.File(binDir, "ssh").apply { writeText("#!/bin/sh\n"); setExecutable(true) }
+            java.io.File(binDir, "sh").apply { writeText("#!/bin/sh\n"); setExecutable(true) }
+
+            val homeDir = java.io.File(tempRoot, "home").apply { mkdirs() }
+            val sshDir = java.io.File(homeDir, ".ssh").apply { mkdirs() }
+            java.io.File(sshDir, "id_ed25519.pub").writeText("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey rur-workstation\n")
+            java.io.File(sshDir, "config").writeText(
+                """
+                # Wildcard entry must be skipped
+                Host *
+                    ServerAliveInterval 60
+
+                Host jetson-ts
+                    HostName 100.64.12.8
+                    User robotuser
+                    Port 2222
+                    IdentityFile ~/.ssh/id_ed25519
+
+                Host rogue-key
+                    HostName 192.168.1.99
+                    User pi
+                    IdentityFile /tmp/outside_key
+                """.trimIndent()
+            )
+
+            var simulatedTailscaleIp: String? = null
+            val simulatedLatencies = mutableMapOf<String, Long?>(
+                "192.168.1.40:22" to 24L,
+                "192.168.1.99:22" to null,
+                "100.64.12.8:2222" to null,
+            )
+
+            val manager = com.termux.custom.ssh.SshDevicesManager(
+                prefixDir = prefixDir,
+                homeDir = homeDir,
+                ioDispatcher = testDispatcher,
+                tcpProber = { host, port, _ -> simulatedLatencies["$host:$port"] },
+                tailscaleIpDetector = { simulatedTailscaleIp },
+            )
+
+            // 2. Strict allowlist validation rejects option injection, shell metacharacters, path traversal, and invalid ports
+            assertTrue(manager.upsertDevice(null, "Evil", "-oProxyCommand=id", 22, "u", com.termux.custom.ssh.SshTransport.DIRECT, "", "").isFailure)
+            assertTrue(manager.upsertDevice(null, "Evil", "192.168.1.1;rm -rf /", 22, "u", com.termux.custom.ssh.SshTransport.DIRECT, "", "").isFailure)
+            assertTrue(manager.upsertDevice(null, "Evil", "192.168.1.1", 0, "u", com.termux.custom.ssh.SshTransport.DIRECT, "", "").isFailure)
+            assertTrue(manager.upsertDevice(null, "Evil", "192.168.1.1", 70000, "u", com.termux.custom.ssh.SshTransport.DIRECT, "", "").isFailure)
+            assertTrue(manager.upsertDevice(null, "Evil", "192.168.1.1", 22, "-root", com.termux.custom.ssh.SshTransport.DIRECT, "", "").isFailure)
+            assertTrue(manager.upsertDevice(null, "Evil", "192.168.1.1", 22, "u", com.termux.custom.ssh.SshTransport.DIRECT, "../id_rsa", "").isFailure)
+            assertTrue(manager.upsertDevice(null, "Evil", "192.168.1.1", 22, "u", com.termux.custom.ssh.SshTransport.DIRECT, "/etc/passwd", "").isFailure)
+
+            // 3. Save valid Direct LAN host & verify persistence + ~/.ssh/config auto-discovery
+            val afterSave = manager.upsertDevice(
+                id = null,
+                name = "Lab PC",
+                host = "192.168.1.40",
+                port = 22,
+                username = "ubuntu",
+                transport = com.termux.custom.ssh.SshTransport.DIRECT,
+                identityFile = "id_ed25519",
+                tags = "ROS2",
+            ).getOrThrow()
+
+            assertTrue(afterSave.opensshInstalled)
+            assertEquals("id_ed25519.pub", afterSave.defaultPublicKeyName)
+            assertEquals(3, afterSave.devices.size) // Lab PC + jetson-ts + rogue-key (Host * skipped)
+
+            val jetson = afterSave.devices.first { it.name == "jetson-ts" }
+            assertEquals(com.termux.custom.ssh.SshTransport.TAILSCALE, jetson.transport)
+            assertEquals(com.termux.custom.ssh.SshDeviceSource.SSH_CONFIG, jetson.source)
+            assertEquals("id_ed25519", jetson.identityFile)
+
+            val rogueKeyHost = afterSave.devices.first { it.name == "rogue-key" }
+            assertEquals("", rogueKeyHost.identityFile) // outside ~/.ssh/ must be ignored
+
+            // 4. Probe with Tailscale OFF -> Lab PC ONLINE (sorted 1st), jetson-ts NEEDS_TAILSCALE, rogue-key OFFLINE
+            val probedOff = manager.probeAllDevices(afterSave)
+            assertFalse(probedOff.isTailscaleActive)
+            assertEquals(1, probedOff.onlineCount)
+            assertEquals("Lab PC", probedOff.sortedDevices.first().name)
+            assertEquals(com.termux.custom.ssh.SshReachability.ONLINE, probedOff.probes[afterSave.devices.first { it.name == "Lab PC" }.id]?.reachability)
+            assertEquals(com.termux.custom.ssh.SshReachability.NEEDS_TAILSCALE, probedOff.probes[jetson.id]?.reachability)
+            assertEquals(com.termux.custom.ssh.SshReachability.OFFLINE, probedOff.probes[rogueKeyHost.id]?.reachability)
+
+            // 5. Probe with Tailscale ON and jetson-ts responding at 8ms -> jetson-ts sorts ahead of 24ms Lab PC
+            simulatedTailscaleIp = "100.64.0.99"
+            simulatedLatencies["100.64.12.8:2222"] = 8L
+            val probedOn = manager.probeAllDevices(probedOff)
+            assertTrue(probedOn.isTailscaleActive)
+            assertEquals(2, probedOn.onlineCount)
+            assertEquals("jetson-ts", probedOn.sortedDevices[0].name)
+            assertEquals("Lab PC", probedOn.sortedDevices[1].name)
+
+            // 6. Verify injection-proof OS execve argv (`--` before host, zero user input interpolated into sh script)
+            val sshArgv = manager.buildSshArgv(jetson)
+            val ddIndex = sshArgv.indexOf("--")
+            assertTrue(ddIndex > 0)
+            assertEquals("100.64.12.8", sshArgv[ddIndex + 1])
+            assertTrue(sshArgv.contains("-l") && sshArgv.contains("robotuser"))
+            assertTrue(sshArgv.contains("-p") && sshArgv.contains("2222"))
+
+            val (shBin, ptyArgv) = manager.buildPtySessionExec(jetson)
+            assertTrue(shBin.endsWith("/bin/sh"))
+            assertEquals("-c", ptyArgv[0])
+            assertFalse("User host must not be interpolated into sh script body", ptyArgv[1].contains("100.64.12.8"))
+            assertFalse("User name must not be interpolated into sh script body", ptyArgv[1].contains("robotuser"))
+            assertEquals("rur-ssh", ptyArgv[2])
+            assertEquals("100.64.12.8", ptyArgv.last())
+
+            // 7. Corrupt ssh-devices.json must NOT be silently overwritten on mutation
+            val devicesJson = java.io.File(homeDir, ".config/melcat/ssh-devices.json")
+            assertTrue(devicesJson.isFile)
+            devicesJson.writeText("{ broken json")
+            val failMutate = manager.deleteDevice(afterSave.devices.first { it.name == "Lab PC" }.id)
+            assertTrue(failMutate.isFailure)
+            assertEquals("{ broken json", devicesJson.readText())
+        } finally {
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `SshDevicesManager guards duplicate IDs, Match blocks, symlinked IdentityFile, IPv6, ESC escape sequences, and cancellation`() = runTest(testDispatcher) {
+        // IPv6 Tailscale ULA & compressed IPv6 validation + bracketed display
+        assertTrue(com.termux.custom.ssh.SshDevicesManager.looksLikeTailscaleHost("fd7a:115c:a1e0::42"))
+        val ipv6Rec = com.termux.custom.ssh.SshDevicesManager.validateRecord(
+            id = "ipv6-1",
+            name = "Loop\u001B]52;c;ZXZpbA==\u0007Node",
+            host = "::1",
+            port = 2222,
+            username = "root",
+            transport = com.termux.custom.ssh.SshTransport.DIRECT,
+            identityFile = "",
+            tags = "",
+        )
+        assertEquals("root@[::1]:2222", ipv6Rec.targetDisplay)
+        assertFalse("ISO control / ESC must be stripped from name", ipv6Rec.name.contains('\u001B'))
+        assertFalse("BEL must be stripped from name", ipv6Rec.name.contains('\u0007'))
+
+        val tempRoot = java.nio.file.Files.createTempDirectory("melcat-ssh-audit-test").toFile()
+        try {
+            val prefixDir = java.io.File(tempRoot, "usr").apply { mkdirs() }
+            val binDir = java.io.File(prefixDir, "bin").apply { mkdirs() }
+            java.io.File(binDir, "ssh").apply { writeText("#!/bin/sh\n"); setExecutable(true) }
+            java.io.File(binDir, "sh").apply { writeText("#!/bin/sh\n"); setExecutable(true) }
+            java.io.File(binDir, "login").apply { writeText("#!/bin/sh\n"); setExecutable(true) }
+
+            val homeDir = java.io.File(tempRoot, "home").apply { mkdirs() }
+            val sshDir = java.io.File(homeDir, ".ssh").apply { mkdirs() }
+            val melcatDir = java.io.File(homeDir, ".config/melcat").apply { mkdirs() }
+
+            // Outside secret + symlink inside ~/.ssh/ pointing to it
+            val outsideKey = java.io.File(tempRoot, "secret_outside_key").apply { writeText("SECRET") }
+            val symlinkKey = java.io.File(sshDir, "evil_link")
+            java.nio.file.Files.createSymbolicLink(symlinkKey.toPath(), outsideKey.toPath())
+
+            // ~/.ssh/config with duplicate stanzas (first-match-wins), multi-alias Host, Match block, and symlinked IdentityFile
+            java.io.File(sshDir, "config").writeText(
+                """
+                Host lab-a lab-b
+                    HostName 192.168.10.5
+                    User firstuser
+                    Port 2200
+                    IdentityFile ~/.ssh/evil_link
+
+                Host lab-a
+                    HostName 192.168.10.99
+                    User seconduser
+                    Port 2299
+
+                Match host *
+                    User matchoverride
+                    HostName 10.0.0.1
+                """.trimIndent()
+            )
+
+            // Hand-edited ssh-devices.json with duplicate IDs (must be deduplicated so LazyColumn never crashes!)
+            java.io.File(melcatDir, "ssh-devices.json").writeText(
+                """
+                {
+                  "version": 1,
+                  "devices": [
+                    {"id": "dup-id", "name": "Node 1", "host": "192.168.1.10", "port": 22, "username": "pi", "transport": "DIRECT"},
+                    {"id": "dup-id", "name": "Node 2", "host": "192.168.1.11", "port": 22, "username": "pi", "transport": "DIRECT"}
+                  ]
+                }
+                """.trimIndent()
+            )
+
+            val probedHosts = mutableListOf<String>()
+            val manager = com.termux.custom.ssh.SshDevicesManager(
+                prefixDir = prefixDir,
+                homeDir = homeDir,
+                ioDispatcher = testDispatcher,
+                tcpProber = { host, _, _ ->
+                    probedHosts.add(host)
+                    10L
+                },
+                tailscaleIpDetector = { null },
+            )
+
+            val state = manager.inspectEnvironmentAndDevices()
+            // Every device ID must be strictly unique (zero Compose LazyColumn duplicate key crashes)
+            assertEquals(state.devices.size, state.devices.map { it.id }.toSet().size)
+
+            // Duplicate stanza for lab-a merged with OpenSSH first-match-wins and NOT overwritten by Match block
+            val labA = state.devices.first { it.name == "lab-a" }
+            assertEquals("192.168.10.5", labA.host)
+            assertEquals("firstuser", labA.username)
+            assertEquals(2200, labA.port)
+            assertEquals("", labA.identityFile) // symlink escape rejected!
+
+            // Unvalidated raw device passed directly to buildPtySessionExec must still strip ESC sequences
+            val (_, ptyArgv) = manager.buildPtySessionExec(
+                com.termux.custom.ssh.SshDeviceRecord(
+                    id = "raw",
+                    name = "Bad\u001B[31mName",
+                    host = "192.168.1.10",
+                    port = 22,
+                    username = "pi",
+                )
+            )
+            assertFalse("ESC must be stripped from label argv", ptyArgv[3].contains('\u001B'))
+            assertTrue("Wrapper script must be static with zero prefix path interpolation", !ptyArgv[1].contains(tempRoot.name))
+
+            // Tailscale host MUST NOT even invoke tcpProber when Tailscale VPN is inactive (avoids DNS stalls)
+            val tsSaved = manager.upsertDevice(
+                null, "TS Box", "jetson.tail999.ts.net", 22, "jetson",
+                com.termux.custom.ssh.SshTransport.TAILSCALE, "", "",
+            ).getOrThrow()
+            probedHosts.clear()
+            val probed = manager.probeAllDevices(tsSaved)
+            assertFalse("Tailscale host must skip TCP/DNS probe when VPN is off", "jetson.tail999.ts.net" in probedHosts)
+            val tsDev = probed.devices.first { it.name == "TS Box" }
+            assertEquals(com.termux.custom.ssh.SshReachability.NEEDS_TAILSCALE, probed.probes[tsDev.id]?.reachability)
+
+            // CancellationException must propagate out of probeAllDevices (never swallowed)
+            val cancellingManager = com.termux.custom.ssh.SshDevicesManager(
+                prefixDir = prefixDir,
+                homeDir = homeDir,
+                ioDispatcher = testDispatcher,
+                tcpProber = { _, _, _ -> throw kotlinx.coroutines.CancellationException("cancelled") },
+                tailscaleIpDetector = { "100.64.0.1" },
+            )
+            var caughtCancel = false
+            try {
+                cancellingManager.probeAllDevices(tsSaved)
+            } catch (_: kotlinx.coroutines.CancellationException) {
+                caughtCancel = true
+            }
+            assertTrue("CancellationException must not be swallowed by probeAllDevices", caughtCancel)
+        } finally {
+            tempRoot.deleteRecursively()
+        }
+    }
 }
 

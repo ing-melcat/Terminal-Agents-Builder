@@ -77,6 +77,7 @@ internal fun SearchableCommandPaletteDialog(
     onToggleZen: () -> Unit,
     onOpenTokenVault: () -> Unit,
     onOpenCodingModelsVault: () -> Unit,
+    onOpenSshPanel: () -> Unit,
     onCheckAppUpdate: () -> Unit,
     onOpenTutorial: () -> Unit,
 ) {
@@ -86,10 +87,12 @@ internal fun SearchableCommandPaletteDialog(
         listOf(
             PaletteAction("agy", "Launch official Google Antigravity CLI (native arm64)", "", "antigravity cli agent", { onExecuteShellCommand("agy") }),
             PaletteAction("opencode", "Launch native Bionic OpenCode v2 coding agent", "", "opencode code coder qwen devstral", { onExecuteShellCommand("opencode") }),
+            PaletteAction("Dispositivos SSH & Tailscale", "Connect to online LAN & Tailscale devices with 1 tap", "", "ssh tailscale lan remote jetson pi devices", onOpenSshPanel),
             PaletteAction("Coding Models & Vault (0600)", "Select code-only models (Free / Eco / Pro / Ollama) & API keys", "", "models openrouter mistral ollama qwen coder codestral codex", onOpenCodingModelsVault),
+            PaletteAction("workstation install-ssh", "Install native Termux OpenSSH client (ssh, ssh-keygen)", "", "ssh openssh install tailscale keygen", { onExecuteShellCommand("workstation install-ssh") }),
             PaletteAction("workstation install-opencode", "Install native Bionic OpenCode v2 via signed APT repo", "", "install opencode bionic apt", { onExecuteShellCommand("workstation install-opencode") }),
             PaletteAction("workstation setup", "Install native Antigravity CLI (agy) + glibc + toolchain", "", "setup install agy glibc", { onExecuteShellCommand("workstation setup") }),
-            PaletteAction("Workstation Doctor", "Verify agy, opencode, glibc, TLS, DNS, skills & 0600 vaults", "", "doctor diagnose toolchain agy opencode", { onExecuteShellCommand("workstation doctor") }),
+            PaletteAction("Workstation Doctor", "Verify agy, opencode, openssh, glibc, TLS, DNS & 0600 vaults", "", "doctor diagnose toolchain agy opencode ssh", { onExecuteShellCommand("workstation doctor") }),
             PaletteAction("agy update", "Self-update native Antigravity CLI binary", "", "update upgrade agy", { onExecuteShellCommand("agy update") }),
             PaletteAction("zellij", "Start Zellij terminal multiplexer", "", "", { onExecuteShellCommand("zellij") }),
             PaletteAction("New Terminal Session", "Spawn an isolated native PTY shell tab", "^⇧T", "", onNewPtySession),

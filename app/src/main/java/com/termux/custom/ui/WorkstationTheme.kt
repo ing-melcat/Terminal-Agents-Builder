@@ -102,12 +102,14 @@ fun resolveFormFactor(widthDp: Int, heightDp: Int): WorkstationFormFactor = when
 enum class PrimaryTab(val label: String) {
     TERMINAL("Terminal"),
     AGENTS("Agents"),
+    SSH("SSH"),
     SHIELD("Shield"),
     STORAGE("Storage"),
 }
 
 enum class InspectorTab(val label: String) {
     AGENTS("Agents"),
+    SSH("SSH"),
     SHIELD("Shield"),
     STORAGE("Storage"),
 }

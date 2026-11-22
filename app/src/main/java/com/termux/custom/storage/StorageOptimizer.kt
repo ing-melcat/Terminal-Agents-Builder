@@ -133,12 +133,12 @@ class StorageOptimizer(
             }
 
             val sourcesArg = existingSources.joinToString(" ")
-            val excludes = "--exclude='*oauth-token*' --exclude='*oauth_creds.json*' --exclude='*credentials*' --exclude='*auth.json*' --exclude='.gemini/antigravity-cli/antigravity-oauth-token' --exclude='.gemini/oauth_creds.json' --exclude='.gemini/google_accounts.json' --exclude='.config/antigravity/antigravity-oauth-token' --exclude='.gemini/antigravity-oauth-token' --exclude='.config/melcat/vault*' --exclude='*.key' --exclude='*providers.env*' --exclude='.local/share/opencode/opencode.db*' --exclude='.local/share/opencode/auth.json*'"
+            val excludes = "--exclude='*oauth-token*' --exclude='*oauth_creds.json*' --exclude='*credentials*' --exclude='*auth.json*' --exclude='.ssh*' --exclude='.config/melcat/ssh-devices.json*' --exclude='*id_ed25519*' --exclude='*id_rsa*' --exclude='*.pem' --exclude='.gemini/antigravity-cli/antigravity-oauth-token' --exclude='.gemini/oauth_creds.json' --exclude='.gemini/google_accounts.json' --exclude='.config/antigravity/antigravity-oauth-token' --exclude='.gemini/antigravity-oauth-token' --exclude='.config/melcat/vault*' --exclude='*.key' --exclude='*providers.env*' --exclude='.local/share/opencode/opencode.db*' --exclude='.local/share/opencode/auth.json*'"
             val shBin = File(prefixDir, "bin/sh").takeIf { it.canExecute() }?.absolutePath ?: "/system/bin/sh"
             val cmd = if (useZstd) {
-                "tar $excludes -cf - -C \"${homeDir.absolutePath}\" $sourcesArg | \"${zstdBinary.absolutePath}\" -T0 -q -o \"${outFile.absolutePath}\""
+                "umask 077; TMP_TAR=\"${outFile.absolutePath}.tmp\"; trap 'rm -f \"\$TMP_TAR\"' EXIT; tar $excludes -cf \"\$TMP_TAR\" -C \"${homeDir.absolutePath}\" $sourcesArg && \"${zstdBinary.absolutePath}\" -T0 -q --rm \"\$TMP_TAR\" -o \"${outFile.absolutePath}\""
             } else {
-                "tar $excludes -czf \"${outFile.absolutePath}\" -C \"${homeDir.absolutePath}\" $sourcesArg"
+                "umask 077; tar $excludes -czf \"${outFile.absolutePath}\" -C \"${homeDir.absolutePath}\" $sourcesArg"
             }
 
             val exitCode = runCatching {

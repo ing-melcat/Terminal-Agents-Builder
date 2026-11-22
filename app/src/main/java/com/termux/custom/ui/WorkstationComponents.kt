@@ -643,35 +643,52 @@ internal fun CompactTelemetryBar(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun InspectorSegmentedHeader(
     selected: InspectorTab,
     onSelect: (InspectorTab) -> Unit,
 ) {
-    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-        InspectorTab.entries.forEachIndexed { idx, tab ->
-            SegmentedButton(
-                selected = selected == tab,
-                onClick = { onSelect(tab) },
-                shape = SegmentedButtonDefaults.itemShape(index = idx, count = InspectorTab.entries.size),
-                icon = {},
-                colors = SegmentedButtonDefaults.colors(
-                    activeContainerColor = WorkstationColors.AccentCyanWash,
-                    activeContentColor = WorkstationColors.AccentCyan,
-                    inactiveContainerColor = WorkstationColors.SurfaceElevated,
-                    inactiveContentColor = WorkstationColors.TextSecondary,
-                    activeBorderColor = WorkstationColors.BorderStrong,
-                    inactiveBorderColor = WorkstationColors.BorderHairline,
-                ),
-            ) {
-                Text(
-                    text = tab.label,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    softWrap = false,
-                    overflow = TextOverflow.Ellipsis,
-                )
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = WorkstationColors.SurfaceElevated,
+        border = BorderStroke(1.dp, WorkstationColors.BorderHairline),
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(36.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(3.dp),
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            InspectorTab.entries.forEach { tab ->
+                val isSelected = selected == tab
+                Surface(
+                    shape = RoundedCornerShape(7.dp),
+                    color = if (isSelected) WorkstationColors.AccentCyanWash else Color.Transparent,
+                    border = if (isSelected) BorderStroke(1.dp, WorkstationColors.BorderStrong) else null,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxSize()
+                        .clickable { onSelect(tab) },
+                ) {
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier.padding(horizontal = 4.dp),
+                    ) {
+                        Text(
+                            text = tab.label,
+                            fontSize = 11.sp,
+                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
+                            color = if (isSelected) WorkstationColors.AccentCyan else WorkstationColors.TextSecondary,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
             }
         }
     }
@@ -812,6 +829,7 @@ internal fun CompactHelpKeycap(
 internal fun tabIcon(tab: PrimaryTab): ImageVector = when (tab) {
     PrimaryTab.TERMINAL -> WorkstationIcons.TerminalPrompt
     PrimaryTab.AGENTS -> WorkstationIcons.AgentsLayers
+    PrimaryTab.SSH -> WorkstationIcons.SshNodes
     PrimaryTab.SHIELD -> WorkstationIcons.ShieldGuard
     PrimaryTab.STORAGE -> WorkstationIcons.StorageVault
 }

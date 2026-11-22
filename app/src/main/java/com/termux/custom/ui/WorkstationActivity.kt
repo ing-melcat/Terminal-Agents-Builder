@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.res.Configuration
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
@@ -41,6 +42,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -69,11 +71,15 @@ import com.termux.custom.guardian.ProcessGuardianService
 import com.termux.custom.provisioning.CustomBootstrapProvisioner
 import com.termux.custom.security.AntigravityTokenWarden
 import com.termux.custom.security.OAuthTokenState
+import com.termux.custom.ssh.SshDeviceRecord
+import com.termux.custom.ssh.SshDevicesManager
+import com.termux.custom.ssh.SshPanelState
 import com.termux.custom.storage.StorageMetrics
 import com.termux.custom.storage.StorageOptimizer
 import com.termux.custom.updater.GitHubReleaseUpdater
 import com.termux.custom.updater.UpdateState
 import com.termux.shared.termux.TermuxConstants
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -89,6 +95,7 @@ class WorkstationActivity : ComponentActivity(), ServiceConnection {
     private lateinit var crdtDatabase: LocalFirstCrdtDatabase
     private lateinit var tokenWarden: AntigravityTokenWarden
     private lateinit var codingAgentsManager: CodingAgentsManager
+    private lateinit var sshDevicesManager: SshDevicesManager
     private lateinit var storageOptimizer: StorageOptimizer
     private lateinit var releaseUpdater: GitHubReleaseUpdater
 
@@ -107,6 +114,7 @@ class WorkstationActivity : ComponentActivity(), ServiceConnection {
         crdtDatabase = LocalFirstCrdtDatabase.getInstance(this)
         tokenWarden = AntigravityTokenWarden(this)
         codingAgentsManager = CodingAgentsManager()
+        sshDevicesManager = SshDevicesManager(context = this)
         storageOptimizer = StorageOptimizer()
         releaseUpdater = GitHubReleaseUpdater(this)
         bootstrapReady = CustomBootstrapProvisioner.isBootstrapInstalled()
@@ -130,6 +138,7 @@ class WorkstationActivity : ComponentActivity(), ServiceConnection {
                     crdtDatabase = crdtDatabase,
                     tokenWarden = tokenWarden,
                     codingAgentsManager = codingAgentsManager,
+                    sshDevicesManager = sshDevicesManager,
                     storageOptimizer = storageOptimizer,
                     releaseUpdater = releaseUpdater,
                 )
@@ -253,6 +262,7 @@ private fun WorkstationRoot(
     crdtDatabase: LocalFirstCrdtDatabase,
     tokenWarden: AntigravityTokenWarden,
     codingAgentsManager: CodingAgentsManager,
+    sshDevicesManager: SshDevicesManager,
     storageOptimizer: StorageOptimizer,
     releaseUpdater: GitHubReleaseUpdater,
 ) {
@@ -328,6 +338,7 @@ private fun WorkstationRoot(
         primaryTab = tab
         when (tab) {
             PrimaryTab.AGENTS -> inspectorTab = InspectorTab.AGENTS
+            PrimaryTab.SSH -> inspectorTab = InspectorTab.SSH
             PrimaryTab.SHIELD -> inspectorTab = InspectorTab.SHIELD
             PrimaryTab.STORAGE -> inspectorTab = InspectorTab.STORAGE
             PrimaryTab.TERMINAL -> Unit
@@ -341,6 +352,7 @@ private fun WorkstationRoot(
             WorkstationFormFactor.PHONE_LANDSCAPE -> {
                 primaryTab = when (tab) {
                     InspectorTab.AGENTS -> PrimaryTab.AGENTS
+                    InspectorTab.SSH -> PrimaryTab.SSH
                     InspectorTab.SHIELD -> PrimaryTab.SHIELD
                     InspectorTab.STORAGE -> PrimaryTab.STORAGE
                 }
@@ -377,6 +389,72 @@ private fun WorkstationRoot(
             )
         )
     }
+    var sshPanelState by remember { mutableStateOf(SshPanelState()) }
+    var sshScanJob by remember { mutableStateOf<Job?>(null) }
+    var sshScanGen by remember { mutableIntStateOf(0) }
+    var sshFilterName by rememberSaveable { mutableStateOf(SshFilter.ALL.name) }
+    var isSshEditorOpen by rememberSaveable { mutableStateOf(false) }
+    var editingSshDeviceId by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingDeleteSshDeviceId by rememberSaveable { mutableStateOf<String?>(null) }
+    var isSshKeygenBusy by remember { mutableStateOf(false) }
+
+    val isSshPanelVisible = when (formFactor) {
+        WorkstationFormFactor.PHONE_PORTRAIT,
+        WorkstationFormFactor.PHONE_LANDSCAPE -> primaryTab == PrimaryTab.SSH
+        WorkstationFormFactor.TABLET_PORTRAIT -> isPortraitSheetOpen && inspectorTab == InspectorTab.SSH
+        WorkstationFormFactor.TABLET_LANDSCAPE -> !isZenMode && inspectorTab == InspectorTab.SSH
+    }
+    val latestSshPanelVisible by rememberUpdatedState(isSshPanelVisible)
+
+    fun cancelSshScan() {
+        sshScanJob?.cancel()
+        sshScanJob = null
+        sshScanGen++
+        if (sshPanelState.isScanning) {
+            sshPanelState = sshPanelState.copy(isScanning = false)
+        }
+    }
+
+    fun triggerSshScan(showFeedback: Boolean = false) {
+        sshScanJob?.cancel()
+        val gen = ++sshScanGen
+        sshScanJob = scope.launch {
+            sshPanelState = sshPanelState.copy(isScanning = true)
+            try {
+                val scanned = sshDevicesManager.probeAllDevices(sshPanelState)
+                if (gen == sshScanGen) {
+                    sshPanelState = scanned
+                    if (showFeedback) {
+                        notify("SSH: ${scanned.onlineCount}/${scanned.devices.size} disponibles")
+                    }
+                }
+            } finally {
+                if (gen == sshScanGen && sshPanelState.isScanning) {
+                    sshPanelState = sshPanelState.copy(isScanning = false)
+                }
+            }
+        }
+    }
+
+    fun openTailscaleApp() {
+        val launchIntent = context.packageManager.getLaunchIntentForPackage("com.tailscale.ipn")
+        if (launchIntent != null) {
+            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            runCatching { context.startActivity(launchIntent) }
+                .onFailure { notify("No se pudo abrir Tailscale", showSnackbar = true) }
+        } else {
+            val downloadIntent = Intent(
+                Intent.ACTION_VIEW,
+                Uri.parse("https://tailscale.com/download/android"),
+            ).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            runCatching { context.startActivity(downloadIntent) }
+                .onSuccess { notify("Tailscale no instalado — abriendo descarga", showSnackbar = true) }
+                .onFailure { notify("Instala Tailscale desde Play Store o F-Droid", showSnackbar = true) }
+        }
+    }
+
     var storageMetrics by remember {
         mutableStateOf(
             StorageMetrics(
@@ -486,6 +564,7 @@ private fun WorkstationRoot(
     LaunchedEffect(pendingPanelRoute) {
         when (pendingPanelRoute) {
             "agents" -> navigateToInspectorTab(InspectorTab.AGENTS)
+            "ssh" -> navigateToInspectorTab(InspectorTab.SSH)
             "shield" -> navigateToInspectorTab(InspectorTab.SHIELD)
             "storage" -> navigateToInspectorTab(InspectorTab.STORAGE)
             "tutorial" -> isTutorialOpen = true
@@ -524,7 +603,9 @@ private fun WorkstationRoot(
                         !isTokenDialogOpen &&
                         !isCodingModelsDialogOpen &&
                         !isOtaTokenDialogOpen &&
-                        !isTutorialOpen
+                        !isTutorialOpen &&
+                        !isSshEditorOpen &&
+                        pendingDeleteSshDeviceId == null
                     ) {
                         surfaceBridge.terminalView.post { surfaceBridge.terminalView.requestFocus() }
                     }
@@ -532,14 +613,19 @@ private fun WorkstationRoot(
                         ProcessGuardianService.refreshSnapshot(context)
                         tokenState = tokenWarden.inspectTokenState()
                         codingAgentsState = codingAgentsManager.inspectState()
+                        sshPanelState = sshDevicesManager.inspectEnvironmentAndDevices(sshPanelState.probes)
                         storageMetrics = storageOptimizer.inspectMetrics(storageMetrics.lastGcSummary)
                         releaseUpdater.refreshTokenState()
+                        if (latestSshPanelVisible) {
+                            triggerSshScan()
+                        }
                     }
                 }
                 Lifecycle.Event.ON_PAUSE -> {
                     surfaceBridge.setCursorBlinker(false)
                 }
                 Lifecycle.Event.ON_STOP -> {
+                    cancelSshScan()
                     surfaceBridge.setCursorBlinker(false)
                     service?.setCustomTerminalSessionClient(null)
                 }
@@ -564,14 +650,24 @@ private fun WorkstationRoot(
         crdtDatabase.seedDefaultsIfFirstRun()
         tokenState = tokenWarden.inspectTokenState()
         codingAgentsState = codingAgentsManager.inspectState()
+        sshPanelState = sshDevicesManager.inspectEnvironmentAndDevices(sshPanelState.probes)
         storageMetrics = storageOptimizer.inspectMetrics()
         releaseUpdater.refreshTokenState()
         ProcessGuardianService.refreshSnapshot(context)
         releaseUpdater.checkForUpdate(silentOnNetworkError = true)
     }
 
-    // Attach active PTY session once TermuxService & atomic bootstrap are ready
-    LaunchedEffect(termuxService, bootstrapReady, activeSessionIndex, sessionRespawnTick) {
+    // Automatically probe live SSH reachability & Tailscale status whenever the SSH panel opens
+    LaunchedEffect(isSshPanelVisible) {
+        if (isSshPanelVisible) {
+            triggerSshScan()
+        } else {
+            cancelSshScan()
+        }
+    }
+
+    // Attach active PTY session once TermuxService & atomic bootstrap are ready (keyed by sessionListVersion so respawned tabs always attach!)
+    LaunchedEffect(termuxService, bootstrapReady, activeSessionIndex, sessionListVersion, sessionRespawnTick) {
         val service = termuxService ?: return@LaunchedEffect
         if (!bootstrapReady && !CustomBootstrapProvisioner.isBootstrapInstalled()) {
             onEnsureBootstrap()
@@ -607,7 +703,10 @@ private fun WorkstationRoot(
             terminalBootError = null
             val safeIdx = activeSessionIndex.coerceIn(0, list.lastIndex)
             if (safeIdx != activeSessionIndex) activeSessionIndex = safeIdx
-            surfaceBridge.attachSession(list[safeIdx].terminalSession)
+            val target = list[safeIdx].terminalSession
+            if (surfaceBridge.attachedSessionHandle != target.mHandle) {
+                surfaceBridge.attachSession(target)
+            }
         }
     }
 
@@ -642,6 +741,88 @@ private fun WorkstationRoot(
             isPortraitSheetOpen = false
         }
         notify("Sent: ${cmd.take(28)}")
+    }
+
+    fun spawnInstallOpenSshSession() {
+        if (!bootstrapReady && !CustomBootstrapProvisioner.isBootstrapInstalled()) {
+            onEnsureBootstrap()
+            notify("Extracting arm64 Linux runtime…")
+            return
+        }
+        val service = termuxService
+        if (service == null) {
+            notify("TermuxService aún iniciando…", showSnackbar = true)
+            return
+        }
+        val (shBin, argv) = sshDevicesManager.buildInstallOpenSshPtyExec()
+        val created = runCatching {
+            service.createTermuxSession(
+                shBin,
+                argv,
+                null,
+                TermuxConstants.TERMUX_HOME_DIR_PATH,
+                false,
+                "install-ssh",
+            )
+        }.getOrNull()
+        if (created != null) {
+            activeSessionIndex = (service.termuxSessions.size - 1).coerceAtLeast(0)
+            sessionListVersion++
+            primaryTab = PrimaryTab.TERMINAL
+            isPortraitSheetOpen = false
+            notify("Instalando OpenSSH nativo en pestaña local…", showSnackbar = true)
+        } else {
+            notify("No se pudo abrir la pestaña de instalación SSH", showSnackbar = true)
+        }
+    }
+
+    fun spawnSshPtySession(device: SshDeviceRecord) {
+        if (!bootstrapReady && !CustomBootstrapProvisioner.isBootstrapInstalled()) {
+            onEnsureBootstrap()
+            notify("Extracting arm64 Linux runtime…")
+            return
+        }
+        if (!sshPanelState.opensshInstalled) {
+            spawnInstallOpenSshSession()
+            return
+        }
+        val service = termuxService
+        if (service == null) {
+            notify("TermuxService aún iniciando…", showSnackbar = true)
+            return
+        }
+        val execPair = runCatching { sshDevicesManager.buildPtySessionExec(device) }.getOrElse { err ->
+            notify(err.message ?: "Dispositivo SSH inválido", showSnackbar = true)
+            return
+        }
+        val created = runCatching {
+            service.createTermuxSession(
+                execPair.first,
+                execPair.second,
+                null,
+                TermuxConstants.TERMUX_HOME_DIR_PATH,
+                false,
+                device.safeTabTitle,
+            )
+        }.getOrNull()
+        if (created != null) {
+            cancelSshScan()
+            activeSessionIndex = (service.termuxSessions.size - 1).coerceAtLeast(0)
+            sessionListVersion++
+            primaryTab = PrimaryTab.TERMINAL
+            isPortraitSheetOpen = false
+            val tsHint = if (device.transport == com.termux.custom.ssh.SshTransport.TAILSCALE && !sshPanelState.isTailscaleActive) {
+                " (verifica Tailscale)"
+            } else {
+                ""
+            }
+            notify("SSH → ${device.name}$tsHint", showSnackbar = true)
+            scope.launch {
+                sshPanelState = sshDevicesManager.markDeviceConnected(device.id, sshPanelState.probes)
+            }
+        } else {
+            notify("No se pudo abrir la sesión SSH", showSnackbar = true)
+        }
     }
 
     val onInstallReadyApk: (File) -> Unit = { apkFile ->
@@ -787,6 +968,55 @@ private fun WorkstationRoot(
                                 isAgentsBusy = false
                             }
                         }
+                    },
+                )
+                InspectorTab.SSH -> SshDevicesPanel(
+                    state = sshPanelState,
+                    activeFilterName = sshFilterName,
+                    isKeygenBusy = isSshKeygenBusy,
+                    onSelectFilter = { sshFilterName = it },
+                    onScanDevices = { triggerSshScan(showFeedback = true) },
+                    onInstallOpenSsh = { spawnInstallOpenSshSession() },
+                    onOpenTailscaleApp = { openTailscaleApp() },
+                    onCopyPublicKey = {
+                        sshPanelState.defaultPublicKey?.let { key ->
+                            clipboard.setText(AnnotatedString(key))
+                            notify("Clave pública SSH copiada al portapapeles", showSnackbar = true)
+                        }
+                    },
+                    onGenerateSshKey = {
+                        if (!isSshKeygenBusy) {
+                            scope.launch {
+                                isSshKeygenBusy = true
+                                try {
+                                    sshDevicesManager.generateDefaultEd25519Key(sshPanelState.probes)
+                                        .onSuccess { updated ->
+                                            sshPanelState = updated
+                                            updated.defaultPublicKey?.let { key ->
+                                                clipboard.setText(AnnotatedString(key))
+                                            }
+                                            notify("Clave ED25519 creada y copiada al portapapeles", showSnackbar = true)
+                                        }
+                                        .onFailure { err ->
+                                            notify(err.message ?: "Error al crear clave SSH", showSnackbar = true)
+                                        }
+                                } finally {
+                                    isSshKeygenBusy = false
+                                }
+                            }
+                        }
+                    },
+                    onConnectDevice = { device -> spawnSshPtySession(device) },
+                    onRequestAddDevice = {
+                        editingSshDeviceId = null
+                        isSshEditorOpen = true
+                    },
+                    onRequestEditDevice = { device ->
+                        editingSshDeviceId = device.id
+                        isSshEditorOpen = true
+                    },
+                    onRequestDeleteDevice = { device ->
+                        pendingDeleteSshDeviceId = device.id
                     },
                 )
                 InspectorTab.SHIELD -> ShieldAndVaultPanel(
@@ -1070,7 +1300,7 @@ private fun WorkstationRoot(
                             .union(WindowInsets.navigationBars)
                             .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal)
                     )
-                    .padding(bottom = if (formFactor == WorkstationFormFactor.PHONE_PORTRAIT && !isImeVisible) 88.dp else 32.dp),
+                    .padding(bottom = if (formFactor == WorkstationFormFactor.PHONE_PORTRAIT && !isImeVisible) 86.dp else 32.dp),
             ) { data ->
                 Snackbar(
                     snackbarData = data,
@@ -1086,7 +1316,11 @@ private fun WorkstationRoot(
             isZenMode = isZenMode,
             onDismiss = { isCommandPaletteOpen = false },
             onExecuteShellCommand = { cmd ->
-                dispatchCommandToPty(cmd)
+                if (cmd == "workstation install-ssh") {
+                    spawnInstallOpenSshSession()
+                } else {
+                    dispatchCommandToPty(cmd)
+                }
                 isCommandPaletteOpen = false
             },
             onNewPtySession = {
@@ -1107,6 +1341,10 @@ private fun WorkstationRoot(
                 codingModelsDialogError = null
                 scope.launch { codingAgentsState = codingAgentsManager.inspectState() }
                 isCodingModelsDialogOpen = true
+            },
+            onOpenSshPanel = {
+                isCommandPaletteOpen = false
+                navigateToInspectorTab(InspectorTab.SSH)
             },
             onCheckAppUpdate = {
                 isCommandPaletteOpen = false
@@ -1246,6 +1484,71 @@ private fun WorkstationRoot(
                     releaseUpdater.savePrivateRepoToken("")
                     isOtaTokenDialogOpen = false
                     notify("GitHub OTA token cleared", showSnackbar = true)
+                }
+            },
+        )
+    }
+
+    if (isSshEditorOpen) {
+        val editingDevice = editingSshDeviceId?.let { id ->
+            sshPanelState.devices.firstOrNull { it.id == id }
+        }
+        AddEditSshDeviceDialog(
+            initial = editingDevice,
+            onDismiss = {
+                isSshEditorOpen = false
+                editingSshDeviceId = null
+            },
+            onSave = { name, host, port, user, transport, identity, tags, onErr ->
+                scope.launch {
+                    cancelSshScan()
+                    val existingSavedId = editingDevice
+                        ?.takeIf { it.source == com.termux.custom.ssh.SshDeviceSource.SAVED }
+                        ?.id
+                    sshDevicesManager.upsertDevice(
+                        id = existingSavedId,
+                        name = name,
+                        host = host,
+                        port = port,
+                        username = user,
+                        transport = transport,
+                        identityFile = identity,
+                        tags = tags,
+                        existingProbes = sshPanelState.probes,
+                    ).onSuccess { updated ->
+                        sshPanelState = updated
+                        isSshEditorOpen = false
+                        editingSshDeviceId = null
+                        notify("Guardado: $name", showSnackbar = true)
+                        triggerSshScan()
+                    }.onFailure { err ->
+                        onErr(err.message ?: "Error al guardar dispositivo")
+                    }
+                }
+            },
+        )
+    }
+
+    val pendingDeleteDevice = pendingDeleteSshDeviceId?.let { id ->
+        sshPanelState.devices.firstOrNull { it.id == id }
+    }
+    if (pendingDeleteDevice != null) {
+        DeleteSshDeviceConfirmDialog(
+            device = pendingDeleteDevice,
+            onDismiss = { pendingDeleteSshDeviceId = null },
+            onConfirmDelete = {
+                val target = pendingDeleteDevice
+                pendingDeleteSshDeviceId = null
+                scope.launch {
+                    cancelSshScan()
+                    sshDevicesManager.deleteDevice(target.id, sshPanelState.probes)
+                        .onSuccess { updated ->
+                            sshPanelState = updated
+                            notify("Eliminado: ${target.name}", showSnackbar = true)
+                        }
+                        .onFailure { err ->
+                            notify(err.message ?: "Error al eliminar dispositivo", showSnackbar = true)
+                        }
                 }
             },
         )
