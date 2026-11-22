@@ -6,7 +6,7 @@
 
 ### Estación de Trabajo Móvil Nativa ARM64 para Agentes de Programación IA, Terminal 120Hz y Control SSH / Tailscale
 
-[![Release](https://img.shields.io/badge/Release-v0.118.0--melcat.12-F2BA0B?style=for-the-badge&logo=github&logoColor=060A0F)](https://github.com/ing-melcat/Terminal-Agents-Builder/releases/tag/v0.118.0-melcat.12)
+[![Release](https://img.shields.io/badge/Release-v1.0-F2BA0B?style=for-the-badge&logo=github&logoColor=060A0F)](https://github.com/ing-melcat/Terminal-Agents-Builder/releases/tag/v1.0)
 [![Android ARM64](https://img.shields.io/badge/Android-arm64--v8a%20(API%2024%2B)-34D399?style=for-the-badge&logo=android&logoColor=060A0F)](https://github.com/ing-melcat/Terminal-Agents-Builder/releases/latest)
 [![Base](https://img.shields.io/badge/Base-Termux%20Nativo%20(Zero%20proot)-0B1016?style=for-the-badge&logo=gnubash&logoColor=F2BA0B)](#-por-qué-es-un-termux-potenciado)
 [![Stack](https://img.shields.io/badge/Kotlin%202.0%20%7C%20Jetpack%20Compose%20%7C%20C%2FJNI-111821?style=for-the-badge&logo=kotlin&logoColor=F2BA0B)](#-lenguajes-stack-tecnológico-y-arquitectura)
@@ -14,7 +14,7 @@
 
 **Construido sobre el motor POSIX nativo de Termux — rediseñado y potenciado como una estación de ingeniería de 120Hz con Antigravity CLI (`agy`), OpenCode v2, Claude CLI, DeepSeek, ChatGPT/Codex, OpenRouter, modelos gratis ($0), Ollama LAN, bóveda `0600` y panel SSH + Tailscale en tiempo real.**
 
-[Descargar APK (`arm64-v8a`)](https://github.com/ing-melcat/Terminal-Agents-Builder/releases/tag/v0.118.0-melcat.12) · [Capturas de Pantalla](#-capturas-de-la-aplicación) · [Agentes y Modelos IA](#-agentes-y-modelos-de-programación-gratis--económicos--pro--locales) · [Panel SSH & Tailscale](#-panel-dedicado-ssh--tailscale-vpn) · [Creador](#-creador)
+[Descargar APK (`arm64-v8a`)](https://github.com/ing-melcat/Terminal-Agents-Builder/releases/tag/v1.0) · [Capturas de Pantalla](#-capturas-de-la-aplicación) · [Agentes y Modelos IA](#-agentes-y-modelos-de-programación-gratis--económicos--pro--locales) · [Panel SSH & Tailscale](#-panel-dedicado-ssh--tailscale-vpn) · [Creador](#-creador)
 
 </div>
 
@@ -180,7 +180,7 @@ app/src/main/java/com/termux/custom/
 - Si tienes **Termux oficial** instalado previamente, desinstálalo primero (ambos usan el identificador `com.termux` requerido por el prefijo nativo `$PREFIX` y los repositorios binarios de Termux).
 
 ### Instalación Rápida
-1. Descarga el APK `arm64-v8a` desde el [**Release oficial `v0.118.0-melcat.12`**](https://github.com/ing-melcat/Terminal-Agents-Builder/releases/tag/v0.118.0-melcat.12).
+1. Descarga el APK `arm64-v8a` desde el [**Release oficial `v1.0`**](https://github.com/ing-melcat/Terminal-Agents-Builder/releases/tag/v1.0).
 2. *(Opcional)* Verifica el archivo `.sha256` incluido en el release.
 3. Instala el APK y ábrelo: el motor POSIX nativo se extraerá automáticamente de forma atómica.
 4. Ejecuta tu flujo inicial desde la interfaz o la terminal:

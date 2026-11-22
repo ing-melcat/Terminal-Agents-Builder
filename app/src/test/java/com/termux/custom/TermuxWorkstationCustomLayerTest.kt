@@ -155,6 +155,9 @@ class TermuxWorkstationCustomLayerTest {
     fun `GitHubReleaseUpdater compares melcat tags accurately and resolves ABI-specific APK`() {
         assertTrue(com.termux.custom.updater.GitHubReleaseUpdater.isRemoteTagNewer("v0.118.0-melcat.3", "v0.118.0-melcat.4"))
         assertTrue(com.termux.custom.updater.GitHubReleaseUpdater.isRemoteTagNewer("v0.118.0-melcat.9", "v0.119.0-melcat.1"))
+        assertTrue(com.termux.custom.updater.GitHubReleaseUpdater.isRemoteTagNewer("v0.118.0-melcat.11", "v1.0"))
+        assertTrue(com.termux.custom.updater.GitHubReleaseUpdater.isRemoteTagNewer("v1.0", "v1.1"))
+        assertFalse(com.termux.custom.updater.GitHubReleaseUpdater.isRemoteTagNewer("v1.0", "v1.0"))
         assertFalse(com.termux.custom.updater.GitHubReleaseUpdater.isRemoteTagNewer("v0.118.0-melcat.3", "v0.118.0-melcat.3"))
         assertFalse(com.termux.custom.updater.GitHubReleaseUpdater.isRemoteTagNewer("v0.118.0-melcat.4", "v0.118.0-melcat.3"))
 
