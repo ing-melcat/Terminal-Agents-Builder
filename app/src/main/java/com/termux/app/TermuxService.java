@@ -774,8 +774,9 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
     public synchronized void setTermuxTerminalSessionClient(TermuxTerminalSessionActivityClient termuxTerminalSessionActivityClient) {
         mTermuxTerminalSessionActivityClient = termuxTerminalSessionActivityClient;
 
+        TermuxTerminalSessionClientBase effective = getTermuxTerminalSessionClient();
         for (int i = 0; i < mShellManager.mTermuxSessions.size(); i++)
-            mShellManager.mTermuxSessions.get(i).getTerminalSession().updateTerminalSessionClient(mTermuxTerminalSessionActivityClient);
+            mShellManager.mTermuxSessions.get(i).getTerminalSession().updateTerminalSessionClient(effective);
     }
 
     /** This should be called when {@link TermuxActivity} has been destroyed and in {@link #onUnbind(Intent)}

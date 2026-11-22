@@ -61,6 +61,7 @@ class TermuxViewSurfaceBridge(
     private val onShortcutCommandPalette: () -> Unit = {},
     private val onShortcutNewSession: () -> Unit = {},
     private val onShortcutCycleSession: () -> Unit = {},
+    private val onShortcutSelectSession: (Int) -> Unit = {},
     private val onShortcutToggleZenMode: () -> Unit = {},
 ) : TerminalSurfaceBridge {
 
@@ -107,12 +108,16 @@ class TermuxViewSurfaceBridge(
     override fun attachSession(session: TerminalSession) {
         currentSession = session
         _isSessionAttached = true
-        terminalView.attachSession(session)
+        val changed = terminalView.attachSession(session)
         terminalView.setTerminalCursorBlinkerState(true, true)
         terminalView.onScreenUpdated()
         terminalView.post {
             terminalView.updateSize()
+            terminalView.setTerminalCursorBlinkerState(true, true)
             terminalView.onScreenUpdated()
+            if (changed && terminalView.isShown && !terminalView.hasFocus()) {
+                terminalView.requestFocus()
+            }
         }
     }
 
@@ -181,13 +186,29 @@ class TermuxViewSurfaceBridge(
     }
 
     override fun showSoftKeyboard() {
-        terminalView.requestFocus()
-        KeyboardUtils.showSoftKeyboard(terminalView.context, terminalView)
+        terminalView.post {
+            terminalView.requestFocus()
+            KeyboardUtils.showSoftKeyboard(terminalView.context, terminalView)
+        }
     }
 
     override fun toggleSoftKeyboard() {
-        terminalView.requestFocus()
-        KeyboardUtils.toggleSoftKeyboard(terminalView.context)
+        terminalView.post {
+            terminalView.requestFocus()
+            val imm = terminalView.context.getSystemService(Context.INPUT_METHOD_SERVICE)
+                as? android.view.inputmethod.InputMethodManager
+            if (imm != null) {
+                val isOpen = androidx.core.view.ViewCompat.getRootWindowInsets(terminalView)
+                    ?.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime()) == true
+                if (isOpen) {
+                    imm.hideSoftInputFromWindow(terminalView.windowToken, 0)
+                } else {
+                    imm.showSoftInput(terminalView, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+                }
+            } else {
+                KeyboardUtils.toggleSoftKeyboard(terminalView.context)
+            }
+        }
     }
 
     override fun sendTextToPty(text: String) {
@@ -292,6 +313,7 @@ class TermuxViewSurfaceBridge(
             if (e == null) return false
             val ctrl = e.isCtrlPressed
             val shift = e.isShiftPressed
+            val alt = e.isAltPressed
 
             if (ctrl && shift && keyCode == KeyEvent.KEYCODE_P) {
                 onShortcutCommandPalette()
@@ -307,6 +329,10 @@ class TermuxViewSurfaceBridge(
             }
             if (ctrl && keyCode == KeyEvent.KEYCODE_TAB) {
                 onShortcutCycleSession()
+                return true
+            }
+            if (alt && !ctrl && !shift && keyCode in KeyEvent.KEYCODE_1..KeyEvent.KEYCODE_9) {
+                onShortcutSelectSession(keyCode - KeyEvent.KEYCODE_1)
                 return true
             }
             if (ctrl && (keyCode == KeyEvent.KEYCODE_EQUALS || keyCode == KeyEvent.KEYCODE_PLUS)) {

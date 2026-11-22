@@ -80,6 +80,7 @@ class WorkstationActivity : ComponentActivity(), ServiceConnection {
     private var termuxService by mutableStateOf<TermuxService?>(null)
     private var isServiceBound = false
     private var bootstrapReady by mutableStateOf(false)
+    private var bootstrapError by mutableStateOf<String?>(null)
     private var serviceBindError by mutableStateOf<String?>(null)
     private var pendingPanelRoute by mutableStateOf<String?>(null)
 
@@ -116,6 +117,7 @@ class WorkstationActivity : ComponentActivity(), ServiceConnection {
                     activity = this,
                     termuxService = termuxService,
                     bootstrapReady = bootstrapReady,
+                    bootstrapError = bootstrapError,
                     serviceBindError = serviceBindError,
                     pendingPanelRoute = pendingPanelRoute,
                     onConsumePanelRoute = { pendingPanelRoute = null },
@@ -174,16 +176,32 @@ class WorkstationActivity : ComponentActivity(), ServiceConnection {
         if (CustomBootstrapProvisioner.isBootstrapInstalled()) {
             isBootstrapInstalling = false
             bootstrapReady = true
+            bootstrapError = null
             // Ensure upgraded CLI scripts (v4: agy login/doctor/upgrade) are provisioned on updates.
             CustomBootstrapProvisioner.runPostBootstrapProvisioningAsync(this)
             return
         }
         if (isBootstrapInstalling) return
         isBootstrapInstalling = true
-        TermuxInstaller.setupBootstrapIfNeeded(this) {
-            isBootstrapInstalling = false
-            bootstrapReady = CustomBootstrapProvisioner.isBootstrapInstalled()
-        }
+        bootstrapError = null
+        TermuxInstaller.setupBootstrapIfNeeded(
+            this,
+            {
+                isBootstrapInstalling = false
+                val installed = CustomBootstrapProvisioner.isBootstrapInstalled()
+                bootstrapReady = installed
+                if (!installed) {
+                    bootstrapError = "Bootstrap incomplete: \$PREFIX/bin/sh or bin/login missing"
+                }
+            },
+            {
+                isBootstrapInstalling = false
+                bootstrapReady = CustomBootstrapProvisioner.isBootstrapInstalled()
+                if (!bootstrapReady) {
+                    bootstrapError = "Bootstrap installation failed"
+                }
+            },
+        )
     }
 
     override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -197,6 +215,8 @@ class WorkstationActivity : ComponentActivity(), ServiceConnection {
 
     override fun onServiceDisconnected(name: ComponentName?) {
         termuxService = null
+        isServiceBound = false
+        serviceBindError = "TermuxService disconnected"
     }
 
     override fun onDestroy() {
@@ -219,6 +239,7 @@ private fun WorkstationRoot(
     activity: WorkstationActivity,
     termuxService: TermuxService?,
     bootstrapReady: Boolean,
+    bootstrapError: String?,
     serviceBindError: String?,
     pendingPanelRoute: String?,
     onConsumePanelRoute: () -> Unit,
@@ -253,6 +274,7 @@ private fun WorkstationRoot(
     var isPortraitSheetOpen by rememberSaveable { mutableStateOf(false) }
     var activeSessionIndex by rememberSaveable { mutableIntStateOf(0) }
     var sessionListVersion by remember { mutableIntStateOf(0) }
+    var sessionRespawnTick by remember { mutableIntStateOf(0) }
 
     var isCommandPaletteOpen by rememberSaveable { mutableStateOf(false) }
     var isTokenDialogOpen by rememberSaveable { mutableStateOf(false) }
@@ -392,6 +414,9 @@ private fun WorkstationRoot(
             index < activeSessionIndex -> (activeSessionIndex - 1).coerceAtLeast(0)
             else -> activeSessionIndex.coerceIn(0, remaining - 1)
         }
+        if (remaining == 0) {
+            sessionRespawnTick++
+        }
         sessionListVersion++
         notify("Closed $label", showSnackbar = true)
     }
@@ -405,6 +430,13 @@ private fun WorkstationRoot(
                 val count = termuxService?.termuxSessions?.size ?: 0
                 if (count > 1) {
                     activeSessionIndex = (activeSessionIndex + 1) % count
+                    sessionListVersion++
+                }
+            },
+            onShortcutSelectSession = { targetIdx ->
+                val count = termuxService?.termuxSessions?.size ?: 0
+                if (targetIdx in 0 until count) {
+                    activeSessionIndex = targetIdx
                     sessionListVersion++
                 }
             },
@@ -449,7 +481,12 @@ private fun WorkstationRoot(
         val service = termuxService
         val client = surfaceBridge.createSessionClient(
             serviceProvider = { termuxService },
-            onSessionsChanged = { sessionListVersion++ },
+            onSessionsChanged = {
+                sessionListVersion++
+                if (termuxService?.termuxSessions?.isEmpty() == true) {
+                    sessionRespawnTick++
+                }
+            },
         )
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
@@ -489,7 +526,7 @@ private fun WorkstationRoot(
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
-        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+        if (lifecycleOwner.lifecycle.currentState != Lifecycle.State.DESTROYED) {
             service?.setCustomTerminalSessionClient(client)
         }
         onDispose {
@@ -512,7 +549,7 @@ private fun WorkstationRoot(
     }
 
     // Attach active PTY session once TermuxService & atomic bootstrap are ready
-    LaunchedEffect(termuxService, bootstrapReady, activeSessionIndex, sessionListVersion) {
+    LaunchedEffect(termuxService, bootstrapReady, activeSessionIndex, sessionRespawnTick) {
         val service = termuxService ?: return@LaunchedEffect
         if (!bootstrapReady && !CustomBootstrapProvisioner.isBootstrapInstalled()) {
             onEnsureBootstrap()
@@ -937,7 +974,7 @@ private fun WorkstationRoot(
                 )
             }
 
-            val bootError = serviceBindError ?: terminalBootError
+            val bootError = serviceBindError ?: bootstrapError ?: terminalBootError
             if (bootError != null && liveSessions.isEmpty()) {
                 Surface(
                     shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
@@ -972,7 +1009,7 @@ private fun WorkstationRoot(
                                         onRetryBindService()
                                     } else {
                                         onEnsureBootstrap()
-                                        spawnNewPtySession("agy-main")
+                                        sessionRespawnTick++
                                     }
                                 },
                             ) {

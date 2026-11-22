@@ -14,15 +14,23 @@ object CustomBootstrapProvisioner {
     private const val STAMP_VERSION_FILE = ".config/melcat/.bootstrap_provisioned_v4"
     private val provisioningLock = Any()
 
+    private fun hasValidPrefixBinaries(): Boolean {
+        val prefixDir = File(TermuxConstants.TERMUX_PREFIX_DIR_PATH)
+        val shBinary = File(prefixDir, "bin/sh")
+        val loginBinary = File(prefixDir, "bin/login")
+        return prefixDir.isDirectory &&
+            shBinary.isFile && shBinary.canExecute() &&
+            loginBinary.isFile && loginBinary.canExecute()
+    }
+
     /**
      * Returns true ONLY when TermuxInstaller's atomic bootstrap extraction has completed
-     * and $PREFIX/bin/sh is an executable binary. Prevents poisoning $PREFIX before extraction.
+     * (not currently in progress) and both $PREFIX/bin/sh and $PREFIX/bin/login are executable.
      */
     @JvmStatic
     fun isBootstrapInstalled(): Boolean {
-        val prefixDir = File(TermuxConstants.TERMUX_PREFIX_DIR_PATH)
-        val shBinary = File(prefixDir, "bin/sh")
-        return prefixDir.isDirectory && shBinary.isFile && shBinary.canExecute()
+        if (com.termux.app.TermuxInstaller.isBootstrapInstallInProgress()) return false
+        return hasValidPrefixBinaries()
     }
 
     @JvmStatic
@@ -46,11 +54,11 @@ object CustomBootstrapProvisioner {
 
     /**
      * Synchronized, idempotent post-bootstrap setup.
-     * Refuses to write inside $PREFIX if Termux bootstrap has not been extracted yet.
+     * Refuses to write inside $PREFIX if Termux bootstrap binaries (bin/sh + bin/login) are not present.
      */
     @JvmStatic
     fun provisionSynchronously(context: Context): Boolean = synchronized(provisioningLock) {
-        if (!isBootstrapInstalled()) {
+        if (!hasValidPrefixBinaries()) {
             Logger.logInfo(LOG_TAG, "Deferring custom provisioning: Termux bootstrap not yet installed.")
             return false
         }

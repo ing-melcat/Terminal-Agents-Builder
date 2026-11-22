@@ -60,11 +60,42 @@ import static com.termux.shared.termux.TermuxConstants.TERMUX_STAGING_PREFIX_DIR
 public final class TermuxInstaller {
 
     private static final String LOG_TAG = "TermuxInstaller";
-    private static final java.util.concurrent.atomic.AtomicBoolean BOOTSTRAP_INSTALL_IN_PROGRESS =
-        new java.util.concurrent.atomic.AtomicBoolean(false);
+    private static final Object BOOTSTRAP_LOCK = new Object();
+    private static volatile boolean sBootstrapInstallInProgress = false;
+    private static final List<PendingCallback> PENDING_CALLBACKS = new ArrayList<>();
+
+    private static final class PendingCallback {
+        final java.lang.ref.WeakReference<Activity> activityRef;
+        final Runnable onSuccess;
+        final Runnable onError;
+
+        PendingCallback(Activity activity, Runnable onSuccess, Runnable onError) {
+            this.activityRef = new java.lang.ref.WeakReference<>(activity);
+            this.onSuccess = onSuccess;
+            this.onError = onError;
+        }
+    }
+
+    public static boolean isBootstrapInstallInProgress() {
+        return sBootstrapInstallInProgress;
+    }
+
+    private static boolean isBootstrapPrefixValid() {
+        if (!FileUtils.directoryFileExists(TERMUX_PREFIX_DIR_PATH, true)) return false;
+        if (TermuxFileUtils.isTermuxPrefixDirectoryEmpty()) return false;
+        File sh = new File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "sh");
+        File login = new File(TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH, "login");
+        return sh.isFile() && sh.canExecute() && login.isFile() && login.canExecute();
+    }
 
     /** Performs bootstrap setup if necessary. */
     public static void setupBootstrapIfNeeded(final Activity activity, final Runnable whenDone) {
+        setupBootstrapIfNeeded(activity, whenDone, null);
+    }
+
+    /** Performs bootstrap setup if necessary, with an optional failure callback. */
+    public static void setupBootstrapIfNeeded(final Activity activity, final Runnable whenDone,
+                                              @androidx.annotation.Nullable final Runnable onFailed) {
         String bootstrapErrorMessage;
         Error filesDirectoryAccessibleError;
 
@@ -81,6 +112,7 @@ public final class TermuxInstaller {
             Logger.logError(LOG_TAG, "isFilesDirectoryAccessible: " + isFilesDirectoryAccessible);
             Logger.logError(LOG_TAG, bootstrapErrorMessage);
             sendBootstrapCrashReportNotification(activity, bootstrapErrorMessage);
+            if (onFailed != null) onFailed.run();
             MessageDialogUtils.exitAppWithErrorMessage(activity,
                 activity.getString(R.string.bootstrap_error_title),
                 bootstrapErrorMessage);
@@ -98,34 +130,39 @@ public final class TermuxInstaller {
 
             Logger.logError(LOG_TAG, bootstrapErrorMessage);
             sendBootstrapCrashReportNotification(activity, bootstrapErrorMessage);
+            if (onFailed != null) onFailed.run();
             MessageDialogUtils.showMessage(activity,
                 activity.getString(R.string.bootstrap_error_title),
                 bootstrapErrorMessage, null);
             return;
         }
 
-        // If prefix directory exists, even if its a symlink to a valid directory and symlink is not broken/dangling
-        if (FileUtils.directoryFileExists(TERMUX_PREFIX_DIR_PATH, true)) {
-            if (TermuxFileUtils.isTermuxPrefixDirectoryEmpty()) {
-                Logger.logInfo(LOG_TAG, "The termux prefix directory \"" + TERMUX_PREFIX_DIR_PATH + "\" exists but is empty or only contains specific unimportant files.");
-            } else {
-                com.termux.custom.provisioning.CustomBootstrapProvisioner.runPostBootstrapProvisioningAsync(activity);
-                whenDone.run();
+        synchronized (BOOTSTRAP_LOCK) {
+            if (sBootstrapInstallInProgress) {
+                Logger.logInfo(LOG_TAG, "Bootstrap installation already in progress; queueing callback.");
+                PENDING_CALLBACKS.add(new PendingCallback(activity, whenDone, onFailed));
                 return;
             }
-        } else if (FileUtils.fileExists(TERMUX_PREFIX_DIR_PATH, false)) {
-            Logger.logInfo(LOG_TAG, "The termux prefix directory \"" + TERMUX_PREFIX_DIR_PATH + "\" does not exist but another file exists at its destination.");
-        }
-
-        if (!BOOTSTRAP_INSTALL_IN_PROGRESS.compareAndSet(false, true)) {
-            Logger.logInfo(LOG_TAG, "Bootstrap installation already in progress; ignoring duplicate trigger.");
-            return;
+            // If prefix directory exists and has valid bin/sh + bin/login binaries
+            if (isBootstrapPrefixValid()) {
+                com.termux.custom.provisioning.CustomBootstrapProvisioner.runPostBootstrapProvisioningAsync(activity);
+                if (whenDone != null) whenDone.run();
+                return;
+            }
+            if (FileUtils.directoryFileExists(TERMUX_PREFIX_DIR_PATH, true)) {
+                Logger.logInfo(LOG_TAG, "The termux prefix directory \"" + TERMUX_PREFIX_DIR_PATH + "\" exists but is empty or incomplete (missing bin/sh or bin/login); re-extracting bootstrap.");
+            } else if (FileUtils.fileExists(TERMUX_PREFIX_DIR_PATH, false)) {
+                Logger.logInfo(LOG_TAG, "The termux prefix directory \"" + TERMUX_PREFIX_DIR_PATH + "\" does not exist but another file exists at its destination.");
+            }
+            sBootstrapInstallInProgress = true;
+            PENDING_CALLBACKS.add(new PendingCallback(activity, whenDone, onFailed));
         }
 
         final ProgressDialog progress = ProgressDialog.show(activity, null, activity.getString(R.string.bootstrap_installer_body), true, false);
         new Thread() {
             @Override
             public void run() {
+                boolean succeeded = false;
                 try {
                     Logger.logInfo(LOG_TAG, "Installing " + TermuxConstants.TERMUX_APP_NAME + " bootstrap packages.");
 
@@ -231,18 +268,34 @@ public final class TermuxInstaller {
 
                     com.termux.custom.provisioning.CustomBootstrapProvisioner.provisionSynchronously(activity);
 
-                    activity.runOnUiThread(whenDone);
+                    succeeded = true;
 
                 } catch (final Exception e) {
                     showBootstrapErrorDialog(activity, whenDone, Logger.getStackTracesMarkdownString(null, Logger.getStackTracesStringArray(e)));
 
                 } finally {
-                    BOOTSTRAP_INSTALL_IN_PROGRESS.set(false);
-                    activity.runOnUiThread(() -> {
+                    final List<PendingCallback> callbacks;
+                    synchronized (BOOTSTRAP_LOCK) {
+                        callbacks = new ArrayList<>(PENDING_CALLBACKS);
+                        PENDING_CALLBACKS.clear();
+                        sBootstrapInstallInProgress = false;
+                    }
+                    final boolean ok = succeeded;
+                    new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
                         try {
                             progress.dismiss();
                         } catch (RuntimeException e) {
                             // Activity already dismissed - ignore.
+                        }
+                        for (PendingCallback cb : callbacks) {
+                            Runnable target = ok ? cb.onSuccess : cb.onError;
+                            if (target == null) continue;
+                            Activity host = cb.activityRef.get();
+                            if (host != null && !host.isFinishing() && !host.isDestroyed()) {
+                                host.runOnUiThread(target);
+                            } else if (ok) {
+                                target.run();
+                            }
                         }
                     });
                 }

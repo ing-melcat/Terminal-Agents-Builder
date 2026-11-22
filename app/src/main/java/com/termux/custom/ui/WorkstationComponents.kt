@@ -102,6 +102,7 @@ internal fun TerminalCanvasHost(
                 android.widget.FrameLayout(ctx).apply {
                     val view = surfaceBridge.terminalView
                     (view.parent as? ViewGroup)?.removeView(view)
+                    view.visibility = if (visible) View.VISIBLE else View.INVISIBLE
                     addView(
                         view,
                         android.widget.FrameLayout.LayoutParams(
@@ -112,6 +113,9 @@ internal fun TerminalCanvasHost(
                     view.post {
                         view.updateSize()
                         view.onScreenUpdated()
+                        if (visible && !view.hasFocus()) {
+                            view.requestFocus()
+                        }
                     }
                 }
             },
@@ -139,6 +143,8 @@ internal fun TerminalCanvasHost(
                     } else {
                         view.onScreenUpdated()
                     }
+                } else if (view.hasFocus()) {
+                    view.clearFocus()
                 }
             },
             onRelease = { container ->
