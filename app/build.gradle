@@ -58,14 +58,14 @@ android {
         applicationId "com.termux"
         minSdkVersion project.properties.minSdkVersion.toInteger()
         targetSdkVersion project.properties.targetSdkVersion.toInteger()
-        versionCode 118
-        versionName "0.118.0"
+        versionCode (System.getenv("WORKSTATION_VERSION_CODE")?.toInteger() ?: 1001)
+        versionName "1.0.1"
 
         if (appVersionName) versionName = appVersionName
         validateVersionName(versionName)
 
         buildConfigField "String", "TERMUX_PACKAGE_VARIANT", "\"" + project.ext.packageVariant + "\"" // Used by TermuxApplication class
-        buildConfigField "String", "WORKSTATION_RELEASE_TAG", "\"" + (System.getenv("WORKSTATION_RELEASE_TAG") ?: "v1.0") + "\""
+        buildConfigField "String", "WORKSTATION_RELEASE_TAG", "\"" + (System.getenv("WORKSTATION_RELEASE_TAG") ?: "v1.0.1") + "\""
 
         manifestPlaceholders.TERMUX_PACKAGE_NAME = "com.termux"
         manifestPlaceholders.TERMUX_APP_NAME = "Termux"

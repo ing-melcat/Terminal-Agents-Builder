@@ -6,7 +6,7 @@ set -eu
 
 PREFIX="/data/data/com.termux/files/usr"
 HOME_DIR="/data/data/com.termux/files/home"
-STAMP_FILE="$HOME_DIR/.config/melcat/.bootstrap_provisioned_v9"
+STAMP_FILE="$HOME_DIR/.config/melcat/.bootstrap_provisioned_v10"
 
 export PATH="$PREFIX/bin:$PATH"
 export HOME="$HOME_DIR"
@@ -40,7 +40,14 @@ for LINK_TARGET in \
     "$HOME_DIR/.gemini/antigravity-cli/skills" \
     "$HOME_DIR/.config/opencode/skills"; do
     if [ ! -L "$LINK_TARGET" ]; then
-        rm -rf "$LINK_TARGET"
+        if [ -d "$LINK_TARGET" ]; then
+            # Non-destructive migration: preserve any user-created skills before symlinking
+            cp -rn "$LINK_TARGET/." "$HOME_DIR/.gemini/config/skills/" 2>/dev/null || \
+                cp -r "$LINK_TARGET/." "$HOME_DIR/.gemini/config/skills/" 2>/dev/null || true
+            rm -rf "$LINK_TARGET"
+        elif [ -e "$LINK_TARGET" ]; then
+            mv -f "$LINK_TARGET" "$LINK_TARGET.bak.$(date +%s)" 2>/dev/null || rm -f "$LINK_TARGET"
+        fi
         ln -s "$HOME_DIR/.gemini/config/skills" "$LINK_TARGET"
     fi
 done

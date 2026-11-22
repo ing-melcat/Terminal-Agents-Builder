@@ -6,7 +6,7 @@
 
 ### Estación de Trabajo Móvil Nativa ARM64 para Agentes de Programación IA, Terminal 120Hz y Control SSH / Tailscale
 
-[![Release](https://img.shields.io/badge/Release-v1.0-F2BA0B?style=for-the-badge&logo=github&logoColor=060A0F)](https://github.com/ing-melcat/Terminal-Agents-Builder/releases/tag/v1.0)
+[![Release](https://img.shields.io/badge/Release-v1.0.1-F2BA0B?style=for-the-badge&logo=github&logoColor=060A0F)](https://github.com/ing-melcat/Terminal-Agents-Builder/releases/latest)
 [![Android ARM64](https://img.shields.io/badge/Android-arm64--v8a%20(API%2024%2B)-34D399?style=for-the-badge&logo=android&logoColor=060A0F)](https://github.com/ing-melcat/Terminal-Agents-Builder/releases/latest)
 [![Base](https://img.shields.io/badge/Base-Termux%20Nativo%20(Zero%20proot)-0B1016?style=for-the-badge&logo=gnubash&logoColor=F2BA0B)](#-por-qué-es-un-termux-potenciado)
 [![Stack](https://img.shields.io/badge/Kotlin%202.0%20%7C%20Jetpack%20Compose%20%7C%20C%2FJNI-111821?style=for-the-badge&logo=kotlin&logoColor=F2BA0B)](#-lenguajes-stack-tecnológico-y-arquitectura)
@@ -14,7 +14,7 @@
 
 **Construido sobre el motor POSIX nativo de Termux — rediseñado y potenciado como una estación de ingeniería de 120Hz con Antigravity CLI (`agy`), OpenCode v2, Claude CLI, DeepSeek, ChatGPT/Codex, OpenRouter, modelos gratis ($0), Ollama LAN, bóveda `0600` y panel SSH + Tailscale en tiempo real.**
 
-[Descargar APK (`arm64-v8a`)](https://github.com/ing-melcat/Terminal-Agents-Builder/releases/tag/v1.0) · [Capturas de Pantalla](#-capturas-de-la-aplicación) · [Agentes y Modelos IA](#-agentes-y-modelos-de-programación-gratis--económicos--pro--locales) · [Panel SSH & Tailscale](#-panel-dedicado-ssh--tailscale-vpn) · [Creador](#-creador)
+[Descargar APK (`arm64-v8a`)](https://github.com/ing-melcat/Terminal-Agents-Builder/releases/latest) · [Capturas de Pantalla](#-capturas-de-la-aplicación) · [Agentes y Modelos IA](#-agentes-y-modelos-de-programación-gratis--económicos--pro--locales) · [Panel SSH & Tailscale](#-panel-dedicado-ssh--tailscale-vpn) · [Creador](#-creador)
 
 </div>
 
@@ -180,9 +180,10 @@ app/src/main/java/com/termux/custom/
 - Si tienes **Termux oficial** instalado previamente, desinstálalo primero (ambos usan el identificador `com.termux` requerido por el prefijo nativo `$PREFIX` y los repositorios binarios de Termux).
 
 ### Instalación Rápida
-1. Descarga el APK `arm64-v8a` desde el [**Release oficial `v1.0`**](https://github.com/ing-melcat/Terminal-Agents-Builder/releases/tag/v1.0).
+1. Descarga el APK `arm64-v8a` desde el [**último Release oficial (`v1.0.1`)**](https://github.com/ing-melcat/Terminal-Agents-Builder/releases/latest).
 2. *(Opcional)* Verifica el archivo `.sha256` incluido en el release.
 3. Instala el APK y ábrelo: el motor POSIX nativo se extraerá automáticamente de forma atómica.
+   > **Al actualizar a una nueva versión:** instala el APK nuevo **directamente encima** (o desde `Shield -> Auto-Updates`) **sin desinstalar** la app anterior para conservar intactos tus paquetes, agentes, llaves SSH, bóvedas `0600` y repositorios.
 4. Ejecuta tu flujo inicial desde la interfaz o la terminal:
    - **Para Antigravity CLI (`agy`) + toolchain completo:** toca **`Install`** en `Agents` (o ejecuta `workstation setup`) y luego corre `agy`.
    - **Para OpenCode v2 + modelos gratis `$0` / OpenRouter / Ollama:** toca **`Install`** en `OpenCode v2`, luego abre **`Models`** para elegir `DeepSeek V4.1 Flash Free` (gratis al instante) o configurar tus claves `0600` / URL Ollama LAN.
