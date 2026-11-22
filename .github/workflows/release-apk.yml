@@ -1,0 +1,218 @@
+name: Release Signed APK (RUR Private Keystore)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag (e.g. v1.1 or v1.0.2)"
+        required: true
+        type: string
+      version_code:
+        description: "Optional explicit Android versionCode (auto-computed from tag if empty)"
+        required: false
+        default: ""
+        type: string
+      prerelease:
+        description: "Mark GitHub Release as Pre-release (Beta)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve version metadata
+        id: meta
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.release_tag }}
+          INPUT_VCODE: ${{ inputs.version_code }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="${INPUT_TAG}"
+            PRERELEASE="${INPUT_PRERELEASE}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+            if [[ "$TAG" == *-* ]]; then
+              PRERELEASE="true"
+            else
+              PRERELEASE="false"
+            fi
+          fi
+
+          # Normalize SemVer 2.0.0 versionName for Termux validateVersionName (major.minor.patch)
+          CLEAN="${TAG#v}"
+          IFS='.' read -r MAJOR MINOR PATCH _ <<< "${CLEAN%%-*}"
+          MAJOR="${MAJOR:-1}"
+          MINOR="${MINOR:-0}"
+          PATCH="${PATCH:-0}"
+          VERSION_NAME="${MAJOR}.${MINOR}.${PATCH}"
+
+          # Strictly monotonic versionCode: v1.0.2 -> 10002, v1.1 -> 10100, v2.0 -> 20000 (> legacy 118 & 1001)
+          if [ -n "${INPUT_VCODE}" ]; then
+            VERSION_CODE="${INPUT_VCODE}"
+          else
+            VERSION_CODE=$(( 10#${MAJOR} * 10000 + 10#${MINOR} * 100 + 10#${PATCH} ))
+          fi
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version_name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+          echo "version_code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${PRERELEASE}" >> "$GITHUB_OUTPUT"
+          echo "Resolved: tag=${TAG}, versionName=${VERSION_NAME}, versionCode=${VERSION_CODE}, prerelease=${PRERELEASE}"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK & NDK 27.2
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-35 build-tools;35.0.0 ndk;27.2.12479018"
+
+      - name: Setup Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Verify Layer 0 invariants & POSIX shell syntax
+        run: |
+          set -euo pipefail
+          sh -n app/src/main/assets/custom/bootstrap-custom.sh
+          grep -q '^targetSdkVersion=28$' gradle.properties
+          grep -q 'applicationId "com.termux"' app/build.gradle
+          test -f terminal-emulator/src/main/jni/termux.c
+
+      - name: Run unit test suite
+        run: ./gradlew testDebugUnitTest --no-daemon
+
+      - name: Decode private RUR signing keystore from GitHub Secrets
+        env:
+          KEYSTORE_B64: ${{ secrets.RUR_RELEASE_KEYSTORE_BASE64 }}
+          STORE_PASS: ${{ secrets.RUR_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RUR_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.RUR_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KEYSTORE_B64" ] || [ -z "$STORE_PASS" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASS" ]; then
+            echo "::error::Missing RUR signing secrets (RUR_RELEASE_KEYSTORE_BASE64, RUR_KEYSTORE_PASSWORD, RUR_KEY_ALIAS, RUR_KEY_PASSWORD)."
+            exit 1
+          fi
+          umask 077
+          printf '%s' "$KEYSTORE_B64" | tr -d '\r\n' | base64 -d > "${RUNNER_TEMP}/rur-release.jks"
+          chmod 0600 "${RUNNER_TEMP}/rur-release.jks"
+
+      - name: Build signed Release APKs (arm64-v8a + universal)
+        env:
+          RUR_REQUIRE_RELEASE_SIGNING: "1"
+          RUR_KEYSTORE_PATH: ${{ runner.temp }}/rur-release.jks
+          RUR_KEYSTORE_PASSWORD: ${{ secrets.RUR_KEYSTORE_PASSWORD }}
+          RUR_KEY_ALIAS: ${{ secrets.RUR_KEY_ALIAS }}
+          RUR_KEY_PASSWORD: ${{ secrets.RUR_KEY_PASSWORD }}
+          TERMUX_SPLIT_APKS_FOR_RELEASE_BUILDS: "1"
+          WORKSTATION_RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          WORKSTATION_VERSION_CODE: ${{ steps.meta.outputs.version_code }}
+          TERMUX_APP_VERSION_NAME: ${{ steps.meta.outputs.version_name }}
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Verify APK signature, cert fingerprint & SHA-256 checksums
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          BT="${ANDROID_HOME}/build-tools/35.0.0"
+          OUT_DIR="app/build/outputs/apk/release"
+          ARM64_APK="${OUT_DIR}/termux-app_apt-android-7-release_arm64-v8a.apk"
+          UNIV_APK="${OUT_DIR}/termux-app_apt-android-7-release_universal.apk"
+
+          test -f "$ARM64_APK"
+          "$BT/apksigner" verify --verbose --print-certs "$ARM64_APK" > /tmp/cert_info.txt
+          cat /tmp/cert_info.txt
+
+          CERT_SHA256="$(grep -m1 'Signer #1 certificate SHA-256 digest:' /tmp/cert_info.txt | awk '{print $NF}')"
+          if [ -z "$CERT_SHA256" ]; then
+            echo "::error::Could not extract signing certificate SHA-256"
+            exit 1
+          fi
+          if [ "$CERT_SHA256" = "b6da01480eefd5fbf2cd3771b8d1021ec791304bdd6c4bf41d3faabad48ee5e1" ]; then
+            echo "::error::Refusing to publish release signed with public Termux testkey_untrusted.jks!"
+            exit 1
+          fi
+
+          "$BT/aapt2" dump badging "$ARM64_APK" | grep -E '^(package:|targetSdkVersion:)'
+
+          ARM64_SHA="$(sha256sum "$ARM64_APK" | awk '{print $1}')"
+          printf '%s  termux-app_apt-android-7-release_arm64-v8a.apk\n' "$ARM64_SHA" > "${ARM64_APK}.sha256"
+
+          if [ -f "$UNIV_APK" ]; then
+            UNIV_SHA="$(sha256sum "$UNIV_APK" | awk '{print $1}')"
+            printf '%s  termux-app_apt-android-7-release_universal.apk\n' "$UNIV_SHA" > "${UNIV_APK}.sha256"
+          fi
+
+          echo "cert_sha256=${CERT_SHA256}" >> "$GITHUB_OUTPUT"
+          echo "arm64_sha256=${ARM64_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release with signed APK assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VNAME: ${{ steps.meta.outputs.version_name }}
+          VCODE: ${{ steps.meta.outputs.version_code }}
+          PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+          CERT_SHA: ${{ steps.verify.outputs.cert_sha256 }}
+          ARM64_SHA: ${{ steps.verify.outputs.arm64_sha256 }}
+        run: |
+          set -euo pipefail
+          OUT_DIR="app/build/outputs/apk/release"
+          ARM64_APK="${OUT_DIR}/termux-app_apt-android-7-release_arm64-v8a.apk"
+          ARM64_SUM="${ARM64_APK}.sha256"
+          UNIV_APK="${OUT_DIR}/termux-app_apt-android-7-release_universal.apk"
+          UNIV_SUM="${UNIV_APK}.sha256"
+
+          ASSETS=("$ARM64_APK" "$ARM64_SUM")
+          if [ -f "$UNIV_APK" ] && [ -f "$UNIV_SUM" ]; then
+            ASSETS+=("$UNIV_APK" "$UNIV_SUM")
+          fi
+
+          NOTES="## ${TAG} (Release Oficial Firmado — RUR Edition)
+
+          - **Versión Android:** \`${VNAME}\` (\`versionCode ${VCODE}\`) · \`arm64-v8a\` + \`universal\`
+          - **APK \`arm64-v8a\` SHA-256:** \`${ARM64_SHA}\`
+          - **Certificado oficial RUR (SHA-256):** \`${CERT_SHA}\`
+
+          > Actualiza instalando el APK directamente **encima** (o desde \`Shield -> Auto-Updates\`) sin desinstalar para conservar tus agentes, paquetes, llaves SSH y bóvedas \`0600\`.
+          > *(Nota: si vienes de una build debug anterior firmada con \`testkey_untrusted.jks\`, haz backup con \`melcat-gc --snapshot\` y desinstala 1 única vez antes de pasar al canal firmado oficial RUR.)*"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
+            gh release edit "$TAG" --title "$TAG" --notes "$NOTES"
+          else
+            FLAGS=(--title "$TAG" --notes "$NOTES")
+            if [ "$PRERELEASE" = "true" ]; then
+              FLAGS+=(--prerelease)
+            else
+              FLAGS+=(--latest)
+            fi
+            gh release create "$TAG" "${ASSETS[@]}" "${FLAGS[@]}"
+          fi
+
+      - name: Shred temporary keystore
+        if: always()
+        run: |
+          if [ -f "${RUNNER_TEMP}/rur-release.jks" ]; then
+            shred -u "${RUNNER_TEMP}/rur-release.jks" 2>/dev/null || rm -f "${RUNNER_TEMP}/rur-release.jks"
+          fi

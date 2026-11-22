@@ -17,8 +17,13 @@ local.properties
 # Gradle generated files
 .gradle/
 
-# Signing files
+# Signing files (NEVER commit private release keystores or passwords!)
 .signing/
+*.jks
+*.keystore
+*.p12
+keystore.properties
+!app/testkey_untrusted.jks
 
 # Intellij
 .idea/

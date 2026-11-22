@@ -93,12 +93,38 @@ android {
         }
     }
 
+    def keystorePropsFile = rootProject.file("keystore.properties")
+    def keystoreProps = new Properties()
+    if (keystorePropsFile.isFile()) {
+        keystorePropsFile.withInputStream { keystoreProps.load(it) }
+    }
+    def releaseStorePath = System.getenv("RUR_KEYSTORE_PATH") ?: keystoreProps.getProperty("storeFile", "")
+    def releaseStorePass = System.getenv("RUR_KEYSTORE_PASSWORD") ?: keystoreProps.getProperty("storePassword", "")
+    def releaseKeyAlias = System.getenv("RUR_KEY_ALIAS") ?: keystoreProps.getProperty("keyAlias", "")
+    def releaseKeyPass = System.getenv("RUR_KEY_PASSWORD") ?: keystoreProps.getProperty("keyPassword", "")
+    def hasReleaseKeystore = releaseStorePath && file(releaseStorePath).isFile() &&
+        releaseStorePass && releaseKeyAlias && releaseKeyPass
+    if (System.getenv("RUR_REQUIRE_RELEASE_SIGNING") == "1" && !hasReleaseKeystore) {
+        throw new GradleException("RUR_REQUIRE_RELEASE_SIGNING=1 is set, but RUR_KEYSTORE_PATH / RUR_KEYSTORE_PASSWORD / RUR_KEY_ALIAS / RUR_KEY_PASSWORD are missing or keystore file was not found.")
+    }
+
     signingConfigs {
         debug {
             storeFile file('testkey_untrusted.jks')
             keyAlias 'alias'
             storePassword 'xrj45yWGLbsO7W0v'
             keyPassword 'xrj45yWGLbsO7W0v'
+        }
+        if (hasReleaseKeystore) {
+            release {
+                storeFile file(releaseStorePath)
+                storePassword releaseStorePass
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPass
+                enableV1Signing true
+                enableV2Signing true
+                enableV3Signing true
+            }
         }
     }
 
@@ -107,6 +133,9 @@ android {
             minifyEnabled true
             shrinkResources false // Reproducible builds
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            if (hasReleaseKeystore) {
+                signingConfig signingConfigs.release
+            }
         }
 
         debug {

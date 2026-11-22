@@ -178,6 +178,38 @@ class TermuxWorkstationCustomLayerTest {
         assertEquals("arm64-v8a", parsed.matchedAbi)
         assertTrue(parsed.apkDownloadUrl.contains("v0.118.0-melcat.4"))
         assertTrue(parsed.sha256Url!!.endsWith(".sha256"))
+
+        // Verify direct GitHub Actions signed release assets are matched cleanly
+        val signedReleaseJson = """
+            {
+              "tag_name": "v1.1",
+              "name": "v1.1",
+              "body": "Signed release",
+              "html_url": "https://github.com/ing-melcat/Terminal-Agents-Builder/releases/tag/v1.1",
+              "assets": [
+                {
+                  "name": "termux-app_apt-android-7-release_universal.apk",
+                  "browser_download_url": "https://github.com/ing-melcat/Terminal-Agents-Builder/releases/download/v1.1/termux-app_apt-android-7-release_universal.apk"
+                },
+                {
+                  "name": "termux-app_apt-android-7-release_arm64-v8a.apk",
+                  "browser_download_url": "https://github.com/ing-melcat/Terminal-Agents-Builder/releases/download/v1.1/termux-app_apt-android-7-release_arm64-v8a.apk"
+                },
+                {
+                  "name": "termux-app_apt-android-7-release_arm64-v8a.apk.sha256",
+                  "browser_download_url": "https://github.com/ing-melcat/Terminal-Agents-Builder/releases/download/v1.1/termux-app_apt-android-7-release_arm64-v8a.apk.sha256"
+                }
+              ]
+            }
+        """.trimIndent()
+        val parsedSigned = com.termux.custom.updater.GitHubReleaseUpdater.parseLatestReleaseJson(
+            signedReleaseJson,
+            listOf("arm64-v8a", "armeabi-v7a"),
+        )
+        assertEquals("v1.1", parsedSigned.tagName)
+        assertEquals("arm64-v8a", parsedSigned.matchedAbi)
+        assertTrue(parsedSigned.apkDownloadUrl.endsWith("release_arm64-v8a.apk"))
+        assertTrue(parsedSigned.sha256Url!!.endsWith("release_arm64-v8a.apk.sha256"))
     }
 
     @Test
