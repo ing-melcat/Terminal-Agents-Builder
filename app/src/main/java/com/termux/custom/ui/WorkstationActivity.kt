@@ -80,6 +80,7 @@ class WorkstationActivity : ComponentActivity(), ServiceConnection {
     private var termuxService by mutableStateOf<TermuxService?>(null)
     private var isServiceBound = false
     private var bootstrapReady by mutableStateOf(false)
+    private var serviceBindError by mutableStateOf<String?>(null)
     private var pendingPanelRoute by mutableStateOf<String?>(null)
 
     private lateinit var crdtDatabase: LocalFirstCrdtDatabase
@@ -106,12 +107,7 @@ class WorkstationActivity : ComponentActivity(), ServiceConnection {
         bootstrapReady = CustomBootstrapProvisioner.isBootstrapInstalled()
         consumeIntentExtras(intent)
 
-        // Start & bind TermuxService safely without BIND_AUTO_CREATE (respects Exit notification)
-        val serviceIntent = Intent(this, TermuxService::class.java)
-        runCatching {
-            ContextCompat.startForegroundService(this, serviceIntent)
-            isServiceBound = bindService(serviceIntent, this, 0)
-        }
+        startAndBindTermuxService()
         ProcessGuardianService.start(this)
 
         setContent {
@@ -120,15 +116,42 @@ class WorkstationActivity : ComponentActivity(), ServiceConnection {
                     activity = this,
                     termuxService = termuxService,
                     bootstrapReady = bootstrapReady,
+                    serviceBindError = serviceBindError,
                     pendingPanelRoute = pendingPanelRoute,
                     onConsumePanelRoute = { pendingPanelRoute = null },
                     onEnsureBootstrap = { ensureBootstrapInstalled() },
+                    onRetryBindService = { startAndBindTermuxService() },
                     crdtDatabase = crdtDatabase,
                     tokenWarden = tokenWarden,
                     storageOptimizer = storageOptimizer,
                     releaseUpdater = releaseUpdater,
                 )
             }
+        }
+    }
+
+    private fun startAndBindTermuxService() {
+        val serviceIntent = Intent(this, TermuxService::class.java)
+        serviceBindError = null
+        val startResult = runCatching {
+            // Match upstream TermuxActivity: startService while Activity is foreground,
+            // falling back to startForegroundService if Android restricts background start.
+            try {
+                startService(serviceIntent)
+            } catch (_: IllegalStateException) {
+                ContextCompat.startForegroundService(this, serviceIntent)
+            }
+            var bound = bindService(serviceIntent, this, 0)
+            if (!bound) {
+                bound = bindService(serviceIntent, this, android.content.Context.BIND_AUTO_CREATE)
+            }
+            isServiceBound = bound
+            if (!bound) {
+                serviceBindError = "bindService(TermuxService) returned false"
+            }
+        }
+        startResult.onFailure { err ->
+            serviceBindError = "TermuxService: ${err.javaClass.simpleName}: ${err.message ?: "failed"}"
         }
     }
 
@@ -148,6 +171,8 @@ class WorkstationActivity : ComponentActivity(), ServiceConnection {
     private fun ensureBootstrapInstalled() {
         if (CustomBootstrapProvisioner.isBootstrapInstalled()) {
             bootstrapReady = true
+            // Ensure upgraded CLI scripts (v4: agy login/doctor/upgrade) are provisioned on updates.
+            CustomBootstrapProvisioner.runPostBootstrapProvisioningAsync(this)
             return
         }
         TermuxInstaller.setupBootstrapIfNeeded(this) {
@@ -158,6 +183,7 @@ class WorkstationActivity : ComponentActivity(), ServiceConnection {
     override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
         val boundService = (service as? TermuxService.LocalBinder)?.service
         termuxService = boundService
+        serviceBindError = if (boundService == null) "LocalBinder returned null service" else null
         if (boundService != null) {
             ensureBootstrapInstalled()
         }
@@ -187,9 +213,11 @@ private fun WorkstationRoot(
     activity: WorkstationActivity,
     termuxService: TermuxService?,
     bootstrapReady: Boolean,
+    serviceBindError: String?,
     pendingPanelRoute: String?,
     onConsumePanelRoute: () -> Unit,
     onEnsureBootstrap: () -> Unit,
+    onRetryBindService: () -> Unit,
     crdtDatabase: LocalFirstCrdtDatabase,
     tokenWarden: AntigravityTokenWarden,
     storageOptimizer: StorageOptimizer,
@@ -464,7 +492,9 @@ private fun WorkstationRoot(
         }
     }
 
-    // Initial async hydration, first-run tutorial offer, and silent OTA check
+    var terminalBootError by remember { mutableStateOf<String?>(null) }
+
+    // Initial async hydration and silent OTA check (never block cold-start terminal with a modal)
     LaunchedEffect(Unit) {
         surfaceBridge.apply120HzFramePacing(activity)
         crdtDatabase.seedDefaultsIfFirstRun()
@@ -472,10 +502,6 @@ private fun WorkstationRoot(
         storageMetrics = storageOptimizer.inspectMetrics()
         releaseUpdater.refreshTokenState()
         ProcessGuardianService.refreshSnapshot(context)
-        if (TutorialProgressStore.shouldAutoOffer(context)) {
-            TutorialProgressStore.setAutoOffered(context, true)
-            isTutorialOpen = true
-        }
         releaseUpdater.checkForUpdate(silentOnNetworkError = true)
     }
 
@@ -488,7 +514,7 @@ private fun WorkstationRoot(
             return@LaunchedEffect
         }
         if (service.termuxSessions.isEmpty()) {
-            runCatching {
+            val createResult = runCatching {
                 service.createTermuxSession(
                     null,
                     null,
@@ -498,10 +524,22 @@ private fun WorkstationRoot(
                     "agy-main",
                 )
             }
-            sessionListVersion++
+            val created = createResult.getOrNull()
+            if (created != null) {
+                terminalBootError = null
+                sessionListVersion++
+            } else {
+                val errDetail = createResult.exceptionOrNull()?.let {
+                    "${it.javaClass.simpleName}: ${it.message}"
+                } ?: "createTermuxSession returned null"
+                terminalBootError = errDetail
+                notify("Terminal error: $errDetail", showSnackbar = true)
+                return@LaunchedEffect
+            }
         }
         val list = service.termuxSessions
         if (list.isNotEmpty()) {
+            terminalBootError = null
             val safeIdx = activeSessionIndex.coerceIn(0, list.lastIndex)
             if (safeIdx != activeSessionIndex) activeSessionIndex = safeIdx
             surfaceBridge.attachSession(list[safeIdx].terminalSession)
@@ -891,6 +929,55 @@ private fun WorkstationRoot(
                         )
                         .padding(top = bannerTopPadding, start = 16.dp, end = 16.dp),
                 )
+            }
+
+            val bootError = serviceBindError ?: terminalBootError
+            if (bootError != null && liveSessions.isEmpty()) {
+                Surface(
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
+                    color = WorkstationColors.SurfaceElevated,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, WorkstationColors.AccentRose),
+                    shadowElevation = 8.dp,
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .padding(horizontal = 24.dp),
+                ) {
+                    androidx.compose.foundation.layout.Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp),
+                    ) {
+                        androidx.compose.material3.Text(
+                            text = "Error al cargar la terminal",
+                            color = WorkstationColors.AccentRose,
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                        )
+                        androidx.compose.material3.Text(
+                            text = bootError,
+                            color = WorkstationColors.TextSecondary,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        )
+                        androidx.compose.foundation.layout.Row(
+                            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
+                        ) {
+                            androidx.compose.material3.Button(
+                                onClick = {
+                                    terminalBootError = null
+                                    if (termuxService == null) {
+                                        onRetryBindService()
+                                    } else {
+                                        onEnsureBootstrap()
+                                        spawnNewPtySession("agy-main")
+                                    }
+                                },
+                            ) {
+                                androidx.compose.material3.Text("Reintentar")
+                            }
+                            androidx.compose.material3.OutlinedButton(onClick = openClassicTermux) {
+                                androidx.compose.material3.Text("Termux Clásico")
+                            }
+                        }
+                    }
+                }
             }
 
             SnackbarHost(

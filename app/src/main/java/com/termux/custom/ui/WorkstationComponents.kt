@@ -98,23 +98,55 @@ internal fun TerminalCanvasHost(
             .clipToBounds(),
     ) {
         AndroidView(
-            factory = {
-                val view = surfaceBridge.terminalView
-                (view.parent as? ViewGroup)?.removeView(view)
-                view
+            factory = { ctx ->
+                android.widget.FrameLayout(ctx).apply {
+                    val view = surfaceBridge.terminalView
+                    (view.parent as? ViewGroup)?.removeView(view)
+                    addView(
+                        view,
+                        android.widget.FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                        ),
+                    )
+                    view.post {
+                        view.updateSize()
+                        view.onScreenUpdated()
+                    }
+                }
             },
-            update = { view ->
+            update = { container ->
+                val view = surfaceBridge.terminalView
+                if (view.parent !== container) {
+                    (view.parent as? ViewGroup)?.removeView(view)
+                    container.addView(
+                        view,
+                        android.widget.FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                        ),
+                    )
+                }
                 val wasInvisible = view.visibility != View.VISIBLE
                 view.visibility = if (visible) View.VISIBLE else View.INVISIBLE
                 if (visible) {
-                    if (wasInvisible || !view.hasFocus()) {
-                        view.post { view.requestFocus() }
+                    if (wasInvisible) {
+                        view.post {
+                            view.requestFocus()
+                            view.updateSize()
+                            view.onScreenUpdated()
+                        }
+                    } else {
+                        view.onScreenUpdated()
                     }
-                    view.onScreenUpdated()
                 }
             },
-            onRelease = { view ->
-                (view.parent as? ViewGroup)?.removeView(view)
+            onRelease = { container ->
+                // Only remove from THIS container; never detach if already moved to a new layout slot.
+                val view = surfaceBridge.terminalView
+                if (view.parent === container) {
+                    container.removeView(view)
+                }
             },
             modifier = Modifier
                 .fillMaxSize()

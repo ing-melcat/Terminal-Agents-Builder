@@ -110,6 +110,10 @@ class TermuxViewSurfaceBridge(
         terminalView.attachSession(session)
         terminalView.setTerminalCursorBlinkerState(true, true)
         terminalView.onScreenUpdated()
+        terminalView.post {
+            terminalView.updateSize()
+            terminalView.onScreenUpdated()
+        }
     }
 
     override fun createSessionClient(
