@@ -11,7 +11,7 @@ object CustomBootstrapProvisioner {
 
     private const val LOG_TAG = "CustomBootstrapProvisioner"
     private const val ASSET_SCRIPT_PATH = "custom/bootstrap-custom.sh"
-    private const val STAMP_VERSION_FILE = ".config/melcat/.bootstrap_provisioned_v6"
+    private const val STAMP_VERSION_FILE = ".config/melcat/.bootstrap_provisioned_v7"
     private val provisioningLock = Any()
 
     private fun hasValidPrefixBinaries(): Boolean {
@@ -66,10 +66,10 @@ object CustomBootstrapProvisioner {
         val prefixDir = File(TermuxConstants.TERMUX_PREFIX_DIR_PATH)
         val homeDir = File(TermuxConstants.TERMUX_HOME_DIR_PATH)
         val stampFile = File(homeDir, STAMP_VERSION_FILE)
-        val agyBin = File(prefixDir, "bin/agy")
+        val workstationBin = File(prefixDir, "bin/workstation")
         val gcBin = File(prefixDir, "bin/melcat-gc")
 
-        if (stampFile.isFile && agyBin.canExecute() && gcBin.canExecute()) {
+        if (stampFile.isFile && workstationBin.canExecute() && gcBin.canExecute()) {
             return true
         }
 
@@ -78,26 +78,29 @@ object CustomBootstrapProvisioner {
         }
 
         val geminiSkillsDir = File(homeDir, ".gemini/config/skills")
+        val agyCliDir = File(homeDir, ".gemini/antigravity-cli")
         val claudeDir = File(homeDir, ".claude")
-        val claudeSkillsLink = File(claudeDir, "skills")
         val antigravityConfigDir = File(homeDir, ".config/antigravity")
         val melcatConfigDir = File(homeDir, ".config/melcat")
 
         geminiSkillsDir.mkdirs()
+        agyCliDir.mkdirs()
         claudeDir.mkdirs()
         antigravityConfigDir.mkdirs()
         melcatConfigDir.mkdirs()
         runCatching { Os.chmod(antigravityConfigDir.absolutePath, 448) } // 0700
+        runCatching { Os.chmod(agyCliDir.absolutePath, 448) } // 0700
 
-        // Safely check for missing or broken symlink using Os.lstat
-        runCatching {
-            val lstatExists = runCatching { Os.lstat(claudeSkillsLink.absolutePath) }.isSuccess
-            if (lstatExists && !claudeSkillsLink.exists()) {
-                // Broken symlink — unlink before recreating
-                Os.remove(claudeSkillsLink.absolutePath)
-            }
-            if (runCatching { Os.lstat(claudeSkillsLink.absolutePath) }.isFailure) {
-                Os.symlink(geminiSkillsDir.absolutePath, claudeSkillsLink.absolutePath)
+        // Safely link both ~/.claude/skills and ~/.gemini/antigravity-cli/skills -> ~/.gemini/config/skills
+        listOf(File(claudeDir, "skills"), File(agyCliDir, "skills")).forEach { link ->
+            runCatching {
+                val lstatExists = runCatching { Os.lstat(link.absolutePath) }.isSuccess
+                if (lstatExists && !link.exists()) {
+                    Os.remove(link.absolutePath)
+                }
+                if (runCatching { Os.lstat(link.absolutePath) }.isFailure) {
+                    Os.symlink(geminiSkillsDir.absolutePath, link.absolutePath)
+                }
             }
         }
 

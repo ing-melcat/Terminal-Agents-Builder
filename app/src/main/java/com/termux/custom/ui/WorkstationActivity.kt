@@ -463,33 +463,7 @@ private fun WorkstationRoot(
         isZenMode = false
     }
 
-    var isOAuthInProgress by remember { mutableStateOf(false) }
-
-    fun startGoogleOAuthFlow() {
-        if (isOAuthInProgress) return
-        isOAuthInProgress = true
-        tokenDialogError = null
-        notify("Opening Google Sign-In in browser…", showSnackbar = true)
-        scope.launch {
-            try {
-                tokenWarden.signInWithGoogleOAuth(activity).onSuccess { updated ->
-                    tokenState = updated
-                    tokenDialogError = null
-                    isTokenDialogOpen = false
-                    val label = updated.accountEmail ?: updated.posixModeOctal
-                    notify("Signed in with Google ($label)", showSnackbar = true)
-                }.onFailure { err ->
-                    val msg = err.message ?: "Google OAuth failed"
-                    tokenDialogError = msg
-                    notify(msg, showSnackbar = true)
-                }
-            } finally {
-                isOAuthInProgress = false
-            }
-        }
-    }
-
-    // Route `melcat.open_panel` extra from `agy ui` / `agy login`
+    // Route `melcat.open_panel` extra from `workstation ui`
     LaunchedEffect(pendingPanelRoute) {
         when (pendingPanelRoute) {
             "agents" -> navigateToInspectorTab(InspectorTab.AGENTS)
@@ -497,11 +471,6 @@ private fun WorkstationRoot(
             "storage" -> navigateToInspectorTab(InspectorTab.STORAGE)
             "tutorial" -> isTutorialOpen = true
             "terminal" -> primaryTab = PrimaryTab.TERMINAL
-            "oauth_login" -> {
-                navigateToInspectorTab(InspectorTab.SHIELD)
-                isTokenDialogOpen = true
-                startGoogleOAuthFlow()
-            }
         }
         if (pendingPanelRoute != null) onConsumePanelRoute()
     }
@@ -666,15 +635,13 @@ private fun WorkstationRoot(
         when (step) {
             TutorialStep.ARM64_ENGINE_SETUP -> {
                 onEnsureBootstrap()
-                dispatchCommandToPty("agy setup && agy doctor")
+                dispatchCommandToPty("workstation setup && workstation doctor")
             }
             TutorialStep.ACTIVATE_SKILLS -> {
-                dispatchCommandToPty("agy skills")
+                dispatchCommandToPty("workstation skills")
             }
             TutorialStep.OAUTH_VAULT_0600 -> {
-                navigateToInspectorTab(InspectorTab.SHIELD)
-                tokenDialogError = null
-                isTokenDialogOpen = true
+                dispatchCommandToPty("agy")
             }
             TutorialStep.HYPEROS_PHANTOM_SHIELD -> {
                 scope.launch { ProcessGuardianService.refreshSnapshot(context) }
@@ -860,7 +827,7 @@ private fun WorkstationRoot(
                     },
                     isBusy = isStorageBusy,
                     onInstallToolchain = {
-                        dispatchCommandToPty("agy setup && agy doctor")
+                        dispatchCommandToPty("workstation setup && workstation doctor")
                     },
                 )
             }
@@ -1114,8 +1081,11 @@ private fun WorkstationRoot(
                 tokenDialogError = null
                 isTokenDialogOpen = false
             },
-            onGoogleOAuthSignIn = { startGoogleOAuthFlow() },
-            isOAuthInProgress = isOAuthInProgress,
+            onLaunchAgySignIn = {
+                tokenDialogError = null
+                isTokenDialogOpen = false
+                dispatchCommandToPty("agy")
+            },
             onSaveToken = { rawInput ->
                 scope.launch {
                     tokenWarden.provisionOrSyncToken(rawInput).onSuccess { updated ->

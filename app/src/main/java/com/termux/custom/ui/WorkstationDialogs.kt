@@ -74,9 +74,10 @@ internal fun SearchableCommandPaletteDialog(
 
     val actions = remember(isZenMode) {
         listOf(
-            PaletteAction("agy", "Show native Antigravity workstation status & skills", "", "", { onExecuteShellCommand("agy") }),
-            PaletteAction("agy setup", "Install native arm64 toolchain (git, node, zstd, zsh, tmux)", "", "", { onExecuteShellCommand("agy setup") }),
-            PaletteAction("Agy Doctor (diagnose toolchain)", "Verify ARM64 prefix, binaries, and environment health", "", "doctor diagnose toolchain agy", { onExecuteShellCommand("agy doctor") }),
+            PaletteAction("agy", "Launch official Google Antigravity CLI (native arm64)", "", "antigravity cli agent", { onExecuteShellCommand("agy") }),
+            PaletteAction("workstation setup", "Install native Antigravity CLI (agy) + glibc + toolchain", "", "setup install agy glibc", { onExecuteShellCommand("workstation setup") }),
+            PaletteAction("Workstation Doctor", "Verify agy, glibc, TLS, DNS, skills & 0600 vault", "", "doctor diagnose toolchain agy", { onExecuteShellCommand("workstation doctor") }),
+            PaletteAction("agy update", "Self-update native Antigravity CLI binary", "", "update upgrade agy", { onExecuteShellCommand("agy update") }),
             PaletteAction("claude", "Launch Claude CLI interactive session", "", "", { onExecuteShellCommand("claude") }),
             PaletteAction("zellij", "Start Zellij terminal multiplexer", "", "", { onExecuteShellCommand("zellij") }),
             PaletteAction("New Terminal Session", "Spawn an isolated native PTY shell tab", "^⇧T", "", onNewPtySession),
@@ -185,8 +186,7 @@ internal fun SearchableCommandPaletteDialog(
 internal fun TokenVaultDialog(
     currentState: OAuthTokenState,
     onDismiss: () -> Unit,
-    onGoogleOAuthSignIn: () -> Unit,
-    isOAuthInProgress: Boolean,
+    onLaunchAgySignIn: () -> Unit,
     onSaveToken: (String) -> Unit,
     onRevokeToken: () -> Unit,
     errorText: String?,
@@ -196,17 +196,16 @@ internal fun TokenVaultDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = WorkstationColors.SurfaceElevated,
-        title = { Text("Google OAuth 2.0 & Vault (0600)", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        title = { Text("Antigravity CLI OAuth Vault (0600)", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    text = "Authenticate with your Google account in 1 tap (same official OAuth 2.0 flow as 'agy login' / Gemini CLI). Credentials are locked with POSIX 0600 permissions.",
+                    text = "Launch the official Antigravity CLI (`agy`) to complete Google Sign-In directly in your browser. Its token at ~/.gemini/antigravity-cli/antigravity-oauth-token is automatically detected and locked with POSIX 0600.",
                     fontSize = 12.sp,
                     color = WorkstationColors.TextSecondary,
                 )
                 Button(
-                    onClick = onGoogleOAuthSignIn,
-                    enabled = !isOAuthInProgress,
+                    onClick = onLaunchAgySignIn,
                     colors = ButtonDefaults.buttonColors(
                         containerColor = WorkstationColors.AccentCyan,
                         contentColor = WorkstationColors.VoidCanvas,
@@ -214,7 +213,7 @@ internal fun TokenVaultDialog(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(
-                        text = if (isOAuthInProgress) "Waiting for Google Sign-In in browser…" else "Sign in with Google (OAuth 2.0)",
+                        text = "Sign in via Antigravity CLI (agy)",
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -222,16 +221,15 @@ internal fun TokenVaultDialog(
                 }
                 HorizontalDivider(thickness = 1.dp, color = WorkstationColors.BorderHairline)
                 Text(
-                    text = "Or paste an existing token / API key manually:",
+                    text = "Or import an existing antigravity-oauth-token from another device:",
                     fontSize = 11.sp,
                     color = WorkstationColors.TextMuted,
                 )
                 OutlinedTextField(
                     value = inputToken,
                     onValueChange = { inputToken = it },
-                    label = { Text("OAuth Token / API Key", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    label = { Text("antigravity-oauth-token", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     singleLine = true,
-                    enabled = !isOAuthInProgress,
                     isError = !errorText.isNullOrBlank(),
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(
@@ -252,7 +250,7 @@ internal fun TokenVaultDialog(
         confirmButton = {
             Button(
                 onClick = { onSaveToken(inputToken) },
-                enabled = !isOAuthInProgress && inputToken.trim().length >= 8,
+                enabled = inputToken.trim().length >= 8,
             ) {
                 Text("Lock 0600 & Sync", maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
@@ -262,7 +260,6 @@ internal fun TokenVaultDialog(
                 if (currentState.isPresent) {
                     TextButton(
                         onClick = onRevokeToken,
-                        enabled = !isOAuthInProgress,
                         colors = ButtonDefaults.textButtonColors(contentColor = WorkstationColors.AccentRose),
                     ) {
                         Text("Revoke", maxLines = 1, overflow = TextOverflow.Ellipsis)

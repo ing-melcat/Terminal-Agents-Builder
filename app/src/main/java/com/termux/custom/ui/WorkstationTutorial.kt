@@ -74,21 +74,21 @@ enum class TutorialStep(
 ) {
     ARM64_ENGINE_SETUP(
         id = "arm64_engine_setup",
-        title = "1. Motor ARM64 y agy setup",
-        body = "Verifica que el runtime Linux ARM64 esté extraído en \$PREFIX y ejecuta `agy setup` para instalar el toolchain nativo: git, nodejs-lts, zstd, zsh, tmux, ripgrep y jq. Luego `agy doctor` confirma que todo esté [ok] y `agy upgrade` actualiza los paquetes pendientes.",
-        actionLabel = "agy setup && agy doctor",
+        title = "1. Instalar Antigravity CLI (agy) + toolchain",
+        body = "Ejecuta `workstation setup` para instalar glibc, certificados TLS, DNS, el binario oficial de Google Antigravity CLI (`agy` parcheado VA39 para Termux arm64) y git/zstd/zsh/tmux/rg/jq. Luego `workstation doctor` verifica todo en [ok].",
+        actionLabel = "workstation setup && workstation doctor",
     ),
     ACTIVATE_SKILLS(
         id = "activate_skills",
         title = "2. Activar skills unificadas",
-        body = "Las skills viven en ~/.gemini/config/skills y se enlazan simbólicamente a ~/.claude/skills (senior-auditor, motion-framer, caveman). Ejecuta `agy skills` para comprobarlas; agrega nuevas creando una carpeta con SKILL.md.",
-        actionLabel = "agy skills",
+        body = "Las skills globales viven en ~/.gemini/config/skills y se enlazan a ~/.gemini/antigravity-cli/skills y ~/.claude/skills (senior-auditor, motion-framer, caveman). Ejecuta `workstation skills` para comprobarlas.",
+        actionLabel = "workstation skills",
     ),
     OAUTH_VAULT_0600(
         id = "oauth_vault_0600",
-        title = "3. Iniciar sesión con Google OAuth (0600)",
-        body = "Inicia sesión en 1 toque con Google OAuth 2.0 (abre el navegador y sincroniza ~/.gemini/oauth_creds.json + Vault 0600 automáticamente), o ejecuta `agy login` en la terminal. `agy` funciona directo como el CLI oficial.",
-        actionLabel = "Google OAuth / Vault",
+        title = "3. Iniciar sesión en Antigravity CLI (agy)",
+        body = "Ejecuta `agy` (o pulsa 'Sign in via Antigravity CLI' en Shield -> Vault). El binario oficial abrirá Chrome con Google Sign-In y guardará ~/.gemini/antigravity-cli/antigravity-oauth-token con permisos 0600 automáticamente.",
+        actionLabel = "Lanzar agy",
     ),
     HYPEROS_PHANTOM_SHIELD(
         id = "hyperos_phantom_shield",

@@ -710,7 +710,7 @@ internal fun StorageBackupsPanel(
                             modifier = Modifier.fillMaxWidth(),
                         ) {
                             Text(
-                                text = "Install toolchain (agy setup)",
+                                text = "Install toolchain (workstation setup)",
                                 fontSize = 11.sp,
                                 color = WorkstationColors.AccentAmber,
                                 maxLines = 1,

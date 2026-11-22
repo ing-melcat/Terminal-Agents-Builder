@@ -133,7 +133,7 @@ class StorageOptimizer(
             }
 
             val sourcesArg = existingSources.joinToString(" ")
-            val excludes = "--exclude='*oauth-token*' --exclude='*oauth_creds.json*' --exclude='.gemini/oauth_creds.json' --exclude='.gemini/google_accounts.json' --exclude='.config/antigravity/antigravity-oauth-token' --exclude='.gemini/antigravity-oauth-token'"
+            val excludes = "--exclude='*oauth-token*' --exclude='*oauth_creds.json*' --exclude='.gemini/antigravity-cli/antigravity-oauth-token' --exclude='.gemini/oauth_creds.json' --exclude='.gemini/google_accounts.json' --exclude='.config/antigravity/antigravity-oauth-token' --exclude='.gemini/antigravity-oauth-token'"
             val shBin = File(prefixDir, "bin/sh").takeIf { it.canExecute() }?.absolutePath ?: "/system/bin/sh"
             val cmd = if (useZstd) {
                 "tar $excludes -cf - -C \"${homeDir.absolutePath}\" $sourcesArg | \"${zstdBinary.absolutePath}\" -T0 -q -o \"${outFile.absolutePath}\""
