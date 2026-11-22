@@ -5,17 +5,26 @@ import android.system.Os
 import com.termux.shared.logger.Logger
 import com.termux.shared.termux.TermuxConstants
 import java.io.File
+import java.util.concurrent.TimeUnit
 
 object CustomBootstrapProvisioner {
 
     private const val LOG_TAG = "CustomBootstrapProvisioner"
     private const val ASSET_SCRIPT_PATH = "custom/bootstrap-custom.sh"
+    private const val STAMP_VERSION_FILE = ".config/melcat/.bootstrap_provisioned_v3"
+    private val provisioningLock = Any()
 
     /**
-     * Invoked strictly AFTER TermuxInstaller atomic rename ($STAGING_PREFIX -> $PREFIX) completes.
-     * Performs idempotent setup of ~/.gemini/config/skills, symlink to ~/.claude/skills,
-     * melcat-gc binary, and shell environment for agy & claude CLI.
+     * Returns true ONLY when TermuxInstaller's atomic bootstrap extraction has completed
+     * and $PREFIX/bin/sh is an executable binary. Prevents poisoning $PREFIX before extraction.
      */
+    @JvmStatic
+    fun isBootstrapInstalled(): Boolean {
+        val prefixDir = File(TermuxConstants.TERMUX_PREFIX_DIR_PATH)
+        val shBinary = File(prefixDir, "bin/sh")
+        return prefixDir.isDirectory && shBinary.isFile && shBinary.canExecute()
+    }
+
     @JvmStatic
     fun runPostBootstrapProvisioningAsync(context: Context) {
         val appContext = context.applicationContext
@@ -35,10 +44,27 @@ object CustomBootstrapProvisioner {
         ).start()
     }
 
+    /**
+     * Synchronized, idempotent post-bootstrap setup.
+     * Refuses to write inside $PREFIX if Termux bootstrap has not been extracted yet.
+     */
     @JvmStatic
-    fun provisionSynchronously(context: Context): Boolean {
+    fun provisionSynchronously(context: Context): Boolean = synchronized(provisioningLock) {
+        if (!isBootstrapInstalled()) {
+            Logger.logInfo(LOG_TAG, "Deferring custom provisioning: Termux bootstrap not yet installed.")
+            return false
+        }
+
         val prefixDir = File(TermuxConstants.TERMUX_PREFIX_DIR_PATH)
         val homeDir = File(TermuxConstants.TERMUX_HOME_DIR_PATH)
+        val stampFile = File(homeDir, STAMP_VERSION_FILE)
+        val agyBin = File(prefixDir, "bin/agy")
+        val gcBin = File(prefixDir, "bin/melcat-gc")
+
+        if (stampFile.isFile && agyBin.canExecute() && gcBin.canExecute()) {
+            return true
+        }
+
         if (!homeDir.exists()) {
             homeDir.mkdirs()
         }
@@ -53,10 +79,16 @@ object CustomBootstrapProvisioner {
         claudeDir.mkdirs()
         antigravityConfigDir.mkdirs()
         melcatConfigDir.mkdirs()
+        runCatching { Os.chmod(antigravityConfigDir.absolutePath, 448) } // 0700
 
-        // Ensure ~/.claude/skills -> ~/.gemini/config/skills symlink
+        // Safely check for missing or broken symlink using Os.lstat
         runCatching {
-            if (!claudeSkillsLink.exists()) {
+            val lstatExists = runCatching { Os.lstat(claudeSkillsLink.absolutePath) }.isSuccess
+            if (lstatExists && !claudeSkillsLink.exists()) {
+                // Broken symlink — unlink before recreating
+                Os.remove(claudeSkillsLink.absolutePath)
+            }
+            if (runCatching { Os.lstat(claudeSkillsLink.absolutePath) }.isFailure) {
                 Os.symlink(geminiSkillsDir.absolutePath, claudeSkillsLink.absolutePath)
             }
         }
@@ -80,11 +112,11 @@ object CustomBootstrapProvisioner {
             }
         }
 
-        // Extract and execute bootstrap-custom.sh if $PREFIX/bin/sh is available
+        // Extract and run bootstrap-custom.sh with explicit Termux environment and drained output
         val customDir = File(prefixDir, "etc/melcat")
         customDir.mkdirs()
         val scriptFile = File(customDir, "bootstrap-custom.sh")
-        context.assets.open(ASSET_SCRIPT_PATH).use { input ->
+        context.applicationContext.assets.open(ASSET_SCRIPT_PATH).use { input ->
             scriptFile.outputStream().use { output ->
                 input.copyTo(output)
             }
@@ -92,15 +124,29 @@ object CustomBootstrapProvisioner {
         runCatching { Os.chmod(scriptFile.absolutePath, 448) } // 0700
 
         val shBinary = File(prefixDir, "bin/sh")
-        if (shBinary.canExecute()) {
-            val process = ProcessBuilder(shBinary.absolutePath, scriptFile.absolutePath)
-                .directory(homeDir)
-                .redirectErrorStream(true)
-                .start()
-            val exitCode = process.waitFor()
-            Logger.logInfo(LOG_TAG, "bootstrap-custom.sh completed with exitCode=$exitCode")
-            return exitCode == 0
+        val tmpDir = File(prefixDir, "tmp").apply { mkdirs() }
+        val builder = ProcessBuilder(shBinary.absolutePath, scriptFile.absolutePath)
+            .directory(homeDir)
+            .redirectErrorStream(true)
+        builder.environment().apply {
+            put("PREFIX", prefixDir.absolutePath)
+            put("HOME", homeDir.absolutePath)
+            put("TMPDIR", tmpDir.absolutePath)
+            put("PATH", "${prefixDir.absolutePath}/bin:/system/bin")
         }
-        return true
+
+        val process = builder.start()
+        val output = runCatching {
+            process.inputStream.bufferedReader().use { it.readText() }
+        }.getOrDefault("")
+        val completed = process.waitFor(15, TimeUnit.SECONDS)
+        if (!completed) {
+            process.destroyForcibly()
+            Logger.logError(LOG_TAG, "bootstrap-custom.sh timed out: $output")
+            return false
+        }
+        val exitCode = process.exitValue()
+        Logger.logInfo(LOG_TAG, "bootstrap-custom.sh completed with exitCode=$exitCode")
+        return exitCode == 0
     }
 }

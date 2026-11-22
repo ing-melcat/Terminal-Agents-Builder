@@ -16,13 +16,22 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import com.termux.R
 import com.termux.custom.ui.WorkstationActivity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.util.concurrent.TimeUnit
 
 data class GuardianStatus(
     val isServiceRunning: Boolean = false,
@@ -30,9 +39,13 @@ data class GuardianStatus(
     val wifiLockHeld: Boolean = false,
     val batteryOptimizationIgnored: Boolean = false,
     val isHyperOsOrMiui: Boolean = false,
-    val maxPhantomProcesses: String = "32 (Android Default)",
+    val maxPhantomProcesses: String = "Checking...",
     val adbPhantomFixCommand: String = ADB_PHANTOM_FIX_CMD,
 ) {
+    val phantomShielded: Boolean
+        get() = maxPhantomProcesses.startsWith("Unlimited") ||
+            (maxPhantomProcesses.toLongOrNull() ?: 0L) >= 1024L
+
     companion object {
         const val ADB_PHANTOM_FIX_CMD =
             "adb shell \"/system/bin/device_config set_sync_disabled_for_tests persistent && /system/bin/device_config put activity_manager max_phantom_processes 2147483647 && settings put global settings_enable_monitor_phantom_procs false\""
@@ -43,6 +56,7 @@ class ProcessGuardianService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -52,12 +66,15 @@ class ProcessGuardianService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Always enter foreground first to satisfy API 26+ startForegroundService contract
+        startForeground(NOTIFICATION_ID, buildNotification())
+
         when (intent?.action) {
             ACTION_STOP -> {
                 releaseLocks()
-                stopForeground( true)
+                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
                 stopSelf()
-                refreshStatus(this, running = false)
+                publishAsync(running = false)
                 return START_NOT_STICKY
             }
             ACTION_TOGGLE_LOCKS -> {
@@ -72,14 +89,32 @@ class ProcessGuardianService : Service() {
             }
         }
 
-        startForeground(NOTIFICATION_ID, buildNotification())
-        refreshStatus(this, running = true)
-        return START_STICKY
+        // Refresh notification with updated lock state
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+        nm?.notify(NOTIFICATION_ID, buildNotification())
+        publishAsync(running = true)
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {
         releaseLocks()
-        refreshStatus(this, running = false)
+        val appCtx = applicationContext
+        _statusFlow.value = _statusFlow.value.copy(
+            isServiceRunning = false,
+            wakeLockHeld = false,
+            wifiLockHeld = false,
+        )
+        serviceScope.cancel()
+        // Lightweight non-blocking battery check
+        runCatching {
+            val pm = appCtx.getSystemService(Context.POWER_SERVICE) as PowerManager
+            val ignored = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                pm.isIgnoringBatteryOptimizations(appCtx.packageName)
+            } else {
+                true
+            }
+            _statusFlow.value = _statusFlow.value.copy(batteryOptimizationIgnored = ignored)
+        }
         super.onDestroy()
     }
 
@@ -98,7 +133,12 @@ class ProcessGuardianService : Service() {
         val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         if (wifiLock == null) {
             @Suppress("DEPRECATION")
-            wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "TermuxCustom::AgentGuardianWifiLock").apply {
+            val wifiMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            } else {
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            }
+            wifiLock = wm.createWifiLock(wifiMode, "TermuxCustom::AgentGuardianWifiLock").apply {
                 setReferenceCounted(false)
             }
         }
@@ -120,10 +160,10 @@ class ProcessGuardianService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "AI Agents Process Guardian",
+                "Workstation Process Shield",
                 NotificationManager.IMPORTANCE_LOW,
             ).apply {
-                description = "Keeps native arm64-v8a CLI agents (agy & claude) alive under HyperOS"
+                description = "Keeps native arm64 AI agents active in background"
             }
             val nm = getSystemService(NotificationManager::class.java)
             nm?.createNotificationChannel(channel)
@@ -144,21 +184,32 @@ class ProcessGuardianService : Service() {
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_service_notification)
-            .setContentTitle("Terminal Agents Guardian Active")
-            .setContentText("WakeLock: ${if (wakeHeld) "ON" else "OFF"} · High-Perf Wi-Fi: ${if (wifiHeld) "ON" else "OFF"}")
+            .setContentTitle("Terminal Agents Shield Active")
+            .setContentText("WakeLock: ${if (wakeHeld) "ON" else "OFF"} · Low-Latency Wi-Fi: ${if (wifiHeld) "ON" else "OFF"}")
             .setContentIntent(contentIntent)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }
 
-    private fun refreshStatus(context: Context, running: Boolean) {
-        _statusFlow.value = inspectSystemStatus(
-            context = context,
-            isRunning = running,
-            wakeHeld = wakeLock?.isHeld == true,
-            wifiHeld = wifiLock?.isHeld == true,
+    private fun publishAsync(running: Boolean) {
+        val appCtx = applicationContext
+        val wakeHeld = wakeLock?.isHeld == true
+        val wifiHeld = wifiLock?.isHeld == true
+        // Publish lock state immediately without blocking main thread
+        _statusFlow.value = _statusFlow.value.copy(
+            isServiceRunning = running,
+            wakeLockHeld = wakeHeld,
+            wifiLockHeld = wifiHeld,
         )
+        serviceScope.launch {
+            _statusFlow.value = inspectSystemStatusIo(
+                context = appCtx,
+                isRunning = running,
+                wakeHeld = wakeHeld,
+                wifiHeld = wifiHeld,
+            )
+        }
     }
 
     companion object {
@@ -172,31 +223,31 @@ class ProcessGuardianService : Service() {
         val statusFlow: StateFlow<GuardianStatus> = _statusFlow.asStateFlow()
 
         fun start(context: Context) {
-            val intent = Intent(context, ProcessGuardianService::class.java).apply {
+            val intent = Intent(context.applicationContext, ProcessGuardianService::class.java).apply {
                 action = ACTION_START
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
+            runCatching { ContextCompat.startForegroundService(context.applicationContext, intent) }
         }
 
         fun toggleLocks(context: Context) {
-            val intent = Intent(context, ProcessGuardianService::class.java).apply {
+            val intent = Intent(context.applicationContext, ProcessGuardianService::class.java).apply {
                 action = ACTION_TOGGLE_LOCKS
             }
-            context.startService(intent)
+            runCatching { ContextCompat.startForegroundService(context.applicationContext, intent) }
         }
 
-        fun refreshSnapshot(context: Context) {
+        suspend fun refreshSnapshot(context: Context) {
+            val appCtx = context.applicationContext
             val current = _statusFlow.value
-            _statusFlow.value = inspectSystemStatus(
-                context = context,
-                isRunning = current.isServiceRunning,
-                wakeHeld = current.wakeLockHeld,
-                wifiHeld = current.wifiLockHeld,
-            )
+            val updated = withContext(Dispatchers.IO) {
+                inspectSystemStatusIo(
+                    context = appCtx,
+                    isRunning = current.isServiceRunning,
+                    wakeHeld = current.wakeLockHeld,
+                    wifiHeld = current.wifiLockHeld,
+                )
+            }
+            _statusFlow.value = updated
         }
 
         @SuppressLint("BatteryLife")
@@ -237,7 +288,7 @@ class ProcessGuardianService : Service() {
             }
         }
 
-        private fun inspectSystemStatus(
+        private fun inspectSystemStatusIo(
             context: Context,
             isRunning: Boolean,
             wakeHeld: Boolean,
@@ -254,10 +305,10 @@ class ProcessGuardianService : Service() {
             val isXiaomi = manufacturer.contains("xiaomi") ||
                 manufacturer.contains("redmi") ||
                 manufacturer.contains("poco") ||
-                getSystemProperty("ro.miui.ui.version.name").isNotEmpty() ||
-                getSystemProperty("ro.mi.os.version.name").isNotEmpty()
+                readSystemPropertyFast("ro.miui.ui.version.name").isNotEmpty() ||
+                readSystemPropertyFast("ro.mi.os.version.name").isNotEmpty()
 
-            val phantomLimit = probePhantomProcessLimit()
+            val phantomLimit = probePhantomProcessLimitSafe()
 
             return GuardianStatus(
                 isServiceRunning = isRunning,
@@ -269,28 +320,33 @@ class ProcessGuardianService : Service() {
             )
         }
 
-        private fun probePhantomProcessLimit(): String {
+        private fun probePhantomProcessLimitSafe(): String {
             if (Build.VERSION.SDK_INT < 31) {
-                return "Unlimited (SDK < 31)"
+                return "Unlimited (Android < 12)"
             }
             return runCatching {
                 val proc = ProcessBuilder("/system/bin/sh", "-c", "device_config get activity_manager max_phantom_processes 2>/dev/null")
                     .redirectErrorStream(true)
                     .start()
-                val output = BufferedReader(InputStreamReader(proc.inputStream)).readLine()?.trim().orEmpty()
-                proc.waitFor()
+                val output = BufferedReader(InputStreamReader(proc.inputStream)).use { it.readLine()?.trim().orEmpty() }
+                val finished = proc.waitFor(2, TimeUnit.SECONDS)
+                if (!finished) {
+                    proc.destroyForcibly()
+                }
                 if (output.isNotEmpty() && output != "null" && !output.contains("Permission", ignoreCase = true)) {
                     output
                 } else {
-                    "Android 12+ Default (32) — Use ADB Fix"
+                    "32 (Android Default)"
                 }
-            }.getOrDefault("Android 12+ Default (32)")
+            }.getOrDefault("32 (Android Default)")
         }
 
-        private fun getSystemProperty(key: String): String =
+        @SuppressLint("PrivateApi")
+        private fun readSystemPropertyFast(key: String): String =
             runCatching {
-                val proc = ProcessBuilder("/system/bin/getprop", key).start()
-                BufferedReader(InputStreamReader(proc.inputStream)).readLine()?.trim().orEmpty()
+                val clazz = Class.forName("android.os.SystemProperties")
+                val method = clazz.getMethod("get", String::class.java, String::class.java)
+                (method.invoke(null, key, "") as? String).orEmpty()
             }.getOrDefault("")
     }
 }

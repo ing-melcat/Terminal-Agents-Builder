@@ -1,6 +1,8 @@
 package com.termux.custom.storage
 
 import android.os.StatFs
+import android.system.Os
+import android.system.OsConstants
 import com.termux.shared.termux.TermuxConstants
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -9,6 +11,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 
 data class StorageMetrics(
     val prefixPath: String,
@@ -29,7 +32,7 @@ data class StorageMetrics(
         fun formatBytes(bytes: Long): String {
             val mb = bytes / (1024.0 * 1024.0)
             return if (mb >= 1024.0) {
-                String.format(Locale.US, "%.2f GB", mb / 1024.0)
+                String.format(Locale.US, "%.1f GB", mb / 1024.0)
             } else {
                 String.format(Locale.US, "%.1f MB", mb)
             }
@@ -88,62 +91,95 @@ class StorageOptimizer(
             )
             for (dir in cacheCandidates) {
                 if (dir.exists()) {
-                    reclaimedBytes += deleteFilterContents(dir)
+                    reclaimedBytes += deleteFilterContentsSafely(dir)
                 }
             }
 
             if (melcatGcBinary.canExecute()) {
                 runCatching {
-                    ProcessBuilder(melcatGcBinary.absolutePath)
+                    val proc = ProcessBuilder(melcatGcBinary.absolutePath)
                         .directory(homeDir.takeIf { it.exists() })
                         .redirectErrorStream(true)
                         .start()
-                        .waitFor()
+                    proc.inputStream.bufferedReader().use { it.readText() }
+                    if (!proc.waitFor(20, TimeUnit.SECONDS)) {
+                        proc.destroyForcibly()
+                    }
                 }
             }
 
-            inspectMetrics("melcat-gc reclaimed ${StorageMetrics.formatBytes(reclaimedBytes)}")
+            inspectMetrics("Cleaned caches (${StorageMetrics.formatBytes(reclaimedBytes)} reclaimed)")
         }
 
     suspend fun createPortableZstdSnapshot(): StorageMetrics =
         withContext(ioDispatcher) {
             snapshotsDir.mkdirs()
+            runCatching { Os.chmod(snapshotsDir.absolutePath, 448) } // 0700
+
             val timestamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
             val useZstd = zstdBinary.canExecute()
             val outFile = File(
                 snapshotsDir,
-                if (useZstd) "agent-workspace-$timestamp.tar.zst" else "agent-workspace-$timestamp.tar.gz",
+                if (useZstd) "workspace-$timestamp.tar.zst" else "workspace-$timestamp.tar.gz",
             )
 
-            val shBin = File(prefixDir, "bin/sh").takeIf { it.canExecute() }?.absolutePath ?: "/system/bin/sh"
-            val cmd = if (useZstd) {
-                "tar --zstd -cf \"${outFile.absolutePath}\" -C \"${homeDir.absolutePath}\" .gemini .claude .config 2>/dev/null || zstd -T0 -f \"${outFile.absolutePath}\""
-            } else {
-                "tar -czf \"${outFile.absolutePath}\" -C \"${homeDir.absolutePath}\" .gemini .claude .config 2>/dev/null"
+            val existingSources = listOf(".gemini", ".claude", ".config/melcat")
+                .filter { File(homeDir, it).exists() }
+
+            if (existingSources.isEmpty()) {
+                return@withContext inspectMetrics("Nothing to snapshot yet — initialize workspace first")
             }
 
-            runCatching {
+            val sourcesArg = existingSources.joinToString(" ")
+            val excludes = "--exclude='*oauth-token*' --exclude='.config/antigravity/antigravity-oauth-token' --exclude='.gemini/antigravity-oauth-token'"
+            val shBin = File(prefixDir, "bin/sh").takeIf { it.canExecute() }?.absolutePath ?: "/system/bin/sh"
+            val cmd = if (useZstd) {
+                "tar $excludes -cf - -C \"${homeDir.absolutePath}\" $sourcesArg | \"${zstdBinary.absolutePath}\" -T0 -q -o \"${outFile.absolutePath}\""
+            } else {
+                "tar $excludes -czf \"${outFile.absolutePath}\" -C \"${homeDir.absolutePath}\" $sourcesArg"
+            }
+
+            val exitCode = runCatching {
                 val proc = ProcessBuilder(shBin, "-c", cmd)
                     .redirectErrorStream(true)
                     .start()
-                proc.waitFor()
-            }
+                proc.inputStream.bufferedReader().use { it.readText() }
+                if (!proc.waitFor(45, TimeUnit.SECONDS)) {
+                    proc.destroyForcibly()
+                    -1
+                } else {
+                    proc.exitValue()
+                }
+            }.getOrDefault(-1)
 
-            if (!outFile.exists()) {
-                outFile.writeText("{\"snapshot\":\"$timestamp\",\"format\":\"portable-manifest\"}\n")
+            if (exitCode == 0 && outFile.isFile && outFile.length() > 0L) {
+                runCatching { Os.chmod(outFile.absolutePath, 384) } // 0600 on snapshot archive
+                inspectMetrics("Backup saved (${StorageMetrics.formatBytes(outFile.length())}): ${outFile.name}")
+            } else {
+                outFile.delete()
+                inspectMetrics("Backup failed (exit=$exitCode) — verify tar/zstd in terminal")
             }
-
-            inspectMetrics("Snapshot created: ${outFile.name}")
         }
 
-    private fun deleteFilterContents(directory: File): Long {
+    /**
+     * Recursively clears cache files without following symlinks outside target directory.
+     */
+    private fun deleteFilterContentsSafely(directory: File): Long {
         var bytes = 0L
         directory.listFiles()?.forEach { child ->
-            bytes += if (child.isDirectory) {
-                deleteFilterContents(child).also { child.delete() }
+            val isSymlink = runCatching {
+                val st = Os.lstat(child.absolutePath)
+                OsConstants.S_ISLNK(st.st_mode)
+            }.getOrDefault(false)
+
+            if (isSymlink) {
+                child.delete()
+            } else if (child.isDirectory) {
+                bytes += deleteFilterContentsSafely(child)
+                child.delete()
             } else {
                 val len = child.length()
-                if (child.delete()) len else 0L
+                if (child.delete()) bytes += len
             }
         }
         return bytes

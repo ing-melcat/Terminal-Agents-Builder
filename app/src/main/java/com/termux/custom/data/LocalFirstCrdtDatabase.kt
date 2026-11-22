@@ -4,11 +4,14 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import com.termux.shared.termux.TermuxConstants
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -26,17 +29,25 @@ data class AgentSessionRecord(
     val siteId: String,
     val updatedAt: Long,
     val isDeleted: Boolean,
-)
+) {
+    /**
+     * Generates a shell-safe launch/resume command strictly allowlisted against command injection.
+     */
+    fun toSafeLaunchCommand(): String {
+        val safeAgent = if (agentType in ALLOWED_AGENTS) agentType else "agy"
+        val cleanId = id.replace(Regex("[^A-Za-z0-9_-]"), "").take(12)
+        return when (safeAgent) {
+            "agy" -> if (cleanId.isNotEmpty()) "agy --resume $cleanId" else "agy"
+            "claude" -> "claude"
+            "zellij" -> "zellij"
+            else -> "sh"
+        }
+    }
 
-data class CrdtDeltaEntry(
-    val deltaId: String,
-    val entityId: String,
-    val siteId: String,
-    val lamportClock: Long,
-    val hlcTimestamp: Long,
-    val operation: String,
-    val payloadJson: String,
-)
+    companion object {
+        val ALLOWED_AGENTS = setOf("agy", "claude", "zellij", "sh")
+    }
+}
 
 class LocalFirstCrdtDatabase(
     context: Context,
@@ -44,6 +55,7 @@ class LocalFirstCrdtDatabase(
 ) : SQLiteOpenHelper(context.applicationContext, DB_NAME, null, DB_VERSION) {
 
     private val prefs = context.applicationContext.getSharedPreferences("melcat_crdt_meta", Context.MODE_PRIVATE)
+    private val writeMutex = Mutex()
 
     val siteId: String = prefs.getString(KEY_SITE_ID, null) ?: run {
         val generated = "node-" + UUID.randomUUID().toString().take(8)
@@ -61,8 +73,8 @@ class LocalFirstCrdtDatabase(
     override fun onConfigure(db: SQLiteDatabase) {
         super.onConfigure(db)
         db.enableWriteAheadLogging()
+        db.setForeignKeyConstraintsEnabled(true)
         db.execSQL("PRAGMA synchronous = NORMAL;")
-        db.execSQL("PRAGMA foreign_keys = ON;")
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -106,66 +118,126 @@ class LocalFirstCrdtDatabase(
     }
 
     suspend fun refreshSessions() = withContext(ioDispatcher) {
-        _sessionsFlow.value = queryActiveSessionsInternal()
+        writeMutex.withLock {
+            _sessionsFlow.value = queryActiveSessionsInternal()
+        }
+    }
+
+    suspend fun seedDefaultsIfFirstRun() = withContext(ioDispatcher) {
+        writeMutex.withLock {
+            if (prefs.getBoolean(KEY_DEFAULTS_SEEDED, false)) {
+                _sessionsFlow.value = queryActiveSessionsInternal()
+                return@withLock
+            }
+            if (queryActiveSessionsInternal().isEmpty()) {
+                val db = writableDatabase
+                db.beginTransaction()
+                try {
+                    val now = System.currentTimeMillis()
+                    writeRecordAndDelta(
+                        db = db,
+                        record = AgentSessionRecord(
+                            id = UUID.randomUUID().toString(),
+                            title = "Antigravity Architect",
+                            agentType = "agy",
+                            workingDir = TermuxConstants.TERMUX_HOME_DIR_PATH,
+                            compactedSummary = "Local-first architecture, skills & multi-device CRDT workspace",
+                            contextTokens = 4096,
+                            lamportVersion = nextLamportClock(db),
+                            siteId = siteId,
+                            updatedAt = now,
+                            isDeleted = false,
+                        ),
+                        operation = "UPSERT",
+                    )
+                    writeRecordAndDelta(
+                        db = db,
+                        record = AgentSessionRecord(
+                            id = UUID.randomUUID().toString(),
+                            title = "Claude Code Reviewer",
+                            agentType = "claude",
+                            workingDir = TermuxConstants.TERMUX_HOME_DIR_PATH,
+                            compactedSummary = "Interactive arm64 native code review & audit session",
+                            contextTokens = 2048,
+                            lamportVersion = nextLamportClock(db),
+                            siteId = siteId,
+                            updatedAt = now - 1000L,
+                            isDeleted = false,
+                        ),
+                        operation = "UPSERT",
+                    )
+                    db.setTransactionSuccessful()
+                } finally {
+                    db.endTransaction()
+                }
+            }
+            prefs.edit().putBoolean(KEY_DEFAULTS_SEEDED, true).apply()
+            _sessionsFlow.value = queryActiveSessionsInternal()
+        }
     }
 
     suspend fun upsertSession(
         id: String = UUID.randomUUID().toString(),
         title: String,
         agentType: String,
-        workingDir: String = "/data/data/com.termux/files/home",
+        workingDir: String = TermuxConstants.TERMUX_HOME_DIR_PATH,
         compactedSummary: String,
         contextTokens: Int = 0,
     ): AgentSessionRecord = withContext(ioDispatcher) {
-        val db = writableDatabase
-        val now = System.currentTimeMillis()
-        val nextLamport = nextLamportClock(db)
+        writeMutex.withLock {
+            val db = writableDatabase
+            val cleanAgent = if (agentType in AgentSessionRecord.ALLOWED_AGENTS) agentType else "agy"
+            val cleanId = id.replace(Regex("[^A-Za-z0-9_-]"), "").ifEmpty { UUID.randomUUID().toString() }
+            val now = System.currentTimeMillis()
+            lateinit var record: AgentSessionRecord
 
-        val record = AgentSessionRecord(
-            id = id,
-            title = title.trim().ifEmpty { "agy-session" },
-            agentType = agentType,
-            workingDir = workingDir,
-            compactedSummary = compactedSummary.trim(),
-            contextTokens = contextTokens,
-            lamportVersion = nextLamport,
-            siteId = siteId,
-            updatedAt = now,
-            isDeleted = false,
-        )
+            db.beginTransaction()
+            try {
+                val nextLamport = nextLamportClock(db)
+                record = AgentSessionRecord(
+                    id = cleanId,
+                    title = title.trim().ifEmpty { "Agent Workspace" },
+                    agentType = cleanAgent,
+                    workingDir = workingDir,
+                    compactedSummary = compactedSummary.trim(),
+                    contextTokens = contextTokens.coerceAtLeast(0),
+                    lamportVersion = nextLamport,
+                    siteId = siteId,
+                    updatedAt = now,
+                    isDeleted = false,
+                )
+                writeRecordAndDelta(db, record, "UPSERT")
+                db.setTransactionSuccessful()
+            } finally {
+                db.endTransaction()
+            }
 
-        db.beginTransactionNonExclusive()
-        try {
-            writeRecordAndDelta(db, record, "UPSERT")
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
+            _sessionsFlow.value = queryActiveSessionsInternal()
+            record
         }
-
-        _sessionsFlow.value = queryActiveSessionsInternal()
-        record
     }
 
     suspend fun softDeleteSession(id: String) = withContext(ioDispatcher) {
-        val db = writableDatabase
-        val existing = querySessionById(db, id) ?: return@withContext
-        val now = System.currentTimeMillis()
-        val nextLamport = nextLamportClock(db)
-        val tombstone = existing.copy(
-            lamportVersion = nextLamport,
-            siteId = siteId,
-            updatedAt = now,
-            isDeleted = true,
-        )
-
-        db.beginTransactionNonExclusive()
-        try {
-            writeRecordAndDelta(db, tombstone, "TOMBSTONE")
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
+        writeMutex.withLock {
+            val db = writableDatabase
+            db.beginTransaction()
+            try {
+                val existing = querySessionById(db, id)
+                if (existing != null) {
+                    val tombstone = existing.copy(
+                        lamportVersion = nextLamportClock(db),
+                        siteId = siteId,
+                        updatedAt = System.currentTimeMillis(),
+                        isDeleted = true,
+                    )
+                    writeRecordAndDelta(db, tombstone, "TOMBSTONE")
+                    db.setTransactionSuccessful()
+                }
+            } finally {
+                db.endTransaction()
+            }
+            _sessionsFlow.value = queryActiveSessionsInternal()
         }
-        _sessionsFlow.value = queryActiveSessionsInternal()
     }
 
     suspend fun exportDeltaBundleJson(sinceLamport: Long = 0L): String = withContext(ioDispatcher) {
@@ -195,52 +267,62 @@ class LocalFirstCrdtDatabase(
     }
 
     suspend fun mergeRemoteDeltaBundleJson(bundleJson: String): Int = withContext(ioDispatcher) {
-        val root = JSONObject(bundleJson)
-        val deltas = root.optJSONArray("deltas") ?: return@withContext 0
-        val db = writableDatabase
-        var applied = 0
+        writeMutex.withLock {
+            runCatching {
+                val root = JSONObject(bundleJson)
+                val deltas = root.optJSONArray("deltas") ?: return@runCatching 0
+                val db = writableDatabase
+                var applied = 0
 
-        db.beginTransactionNonExclusive()
-        try {
-            for (i in 0 until deltas.length()) {
-                val item = deltas.getJSONObject(i)
-                val payload = item.getJSONObject("payload")
-                val incoming = AgentSessionRecord(
-                    id = payload.getString("id"),
-                    title = payload.getString("title"),
-                    agentType = payload.optString("agentType", "agy"),
-                    workingDir = payload.optString("workingDir", "/data/data/com.termux/files/home"),
-                    compactedSummary = payload.optString("compactedSummary", ""),
-                    contextTokens = payload.optInt("contextTokens", 0),
-                    lamportVersion = payload.getLong("lamportVersion"),
-                    siteId = payload.getString("siteId"),
-                    updatedAt = payload.getLong("updatedAt"),
-                    isDeleted = payload.optBoolean("isDeleted", false),
-                )
+                db.beginTransaction()
+                try {
+                    for (i in 0 until deltas.length()) {
+                        val item = deltas.optJSONObject(i) ?: continue
+                        val payload = item.optJSONObject("payload") ?: continue
+                        val rawId = payload.optString("id", "").replace(Regex("[^A-Za-z0-9_-]"), "")
+                        if (rawId.isEmpty()) continue
+                        val rawAgent = payload.optString("agentType", "agy")
+                        val safeAgent = if (rawAgent in AgentSessionRecord.ALLOWED_AGENTS) rawAgent else "agy"
+                        val isDeleted = payload.optBoolean("isDeleted", false)
 
-                val local = querySessionById(db, incoming.id)
-                val shouldApply = if (local == null) {
-                    true
-                } else if (incoming.lamportVersion != local.lamportVersion) {
-                    incoming.lamportVersion > local.lamportVersion
-                } else if (incoming.updatedAt != local.updatedAt) {
-                    incoming.updatedAt > local.updatedAt
-                } else {
-                    incoming.siteId > local.siteId
+                        val incoming = AgentSessionRecord(
+                            id = rawId,
+                            title = payload.optString("title", "Synced Agent"),
+                            agentType = safeAgent,
+                            workingDir = payload.optString("workingDir", TermuxConstants.TERMUX_HOME_DIR_PATH),
+                            compactedSummary = payload.optString("compactedSummary", ""),
+                            contextTokens = payload.optInt("contextTokens", 0).coerceAtLeast(0),
+                            lamportVersion = payload.optLong("lamportVersion", 1L),
+                            siteId = payload.optString("siteId", "remote"),
+                            updatedAt = payload.optLong("updatedAt", 0L),
+                            isDeleted = isDeleted,
+                        )
+
+                        val local = querySessionById(db, incoming.id)
+                        val shouldApply = if (local == null) {
+                            true
+                        } else if (incoming.lamportVersion != local.lamportVersion) {
+                            incoming.lamportVersion > local.lamportVersion
+                        } else if (incoming.updatedAt != local.updatedAt) {
+                            incoming.updatedAt > local.updatedAt
+                        } else {
+                            incoming.siteId > local.siteId
+                        }
+
+                        if (shouldApply) {
+                            writeRecordAndDelta(db, incoming, if (isDeleted) "TOMBSTONE" else "UPSERT")
+                            applied++
+                        }
+                    }
+                    db.setTransactionSuccessful()
+                } finally {
+                    db.endTransaction()
                 }
 
-                if (shouldApply) {
-                    writeRecordAndDelta(db, incoming, "MERGE_LWW")
-                    applied++
-                }
-            }
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
+                _sessionsFlow.value = queryActiveSessionsInternal()
+                applied
+            }.getOrDefault(0)
         }
-
-        _sessionsFlow.value = queryActiveSessionsInternal()
-        applied
     }
 
     suspend fun exportDeltaBundleToFile(targetDir: File): File = withContext(ioDispatcher) {
@@ -352,5 +434,14 @@ class LocalFirstCrdtDatabase(
         private const val DB_NAME = "melcat_localfirst_crdt.db"
         private const val DB_VERSION = 1
         private const val KEY_SITE_ID = "crdt_site_id"
+        private const val KEY_DEFAULTS_SEEDED = "crdt_defaults_seeded_v1"
+
+        @Volatile
+        private var instance: LocalFirstCrdtDatabase? = null
+
+        fun getInstance(context: Context): LocalFirstCrdtDatabase =
+            instance ?: synchronized(this) {
+                instance ?: LocalFirstCrdtDatabase(context.applicationContext).also { instance = it }
+            }
     }
 }
