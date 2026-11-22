@@ -6,7 +6,7 @@ set -eu
 
 PREFIX="/data/data/com.termux/files/usr"
 HOME_DIR="/data/data/com.termux/files/home"
-STAMP_FILE="$HOME_DIR/.config/melcat/.bootstrap_provisioned_v5"
+STAMP_FILE="$HOME_DIR/.config/melcat/.bootstrap_provisioned_v6"
 
 export PATH="$PREFIX/bin:$PATH"
 export HOME="$HOME_DIR"
@@ -463,17 +463,26 @@ open_ui() {
     echo "[agy] Workstation UI opened."
 }
 
-ensure_agent_cli() {
-    if [ -x "$HOME_DIR/.local/bin/agy" ] || command -v gemini >/dev/null 2>&1; then
+ensure_working_node() {
+    if command -v node >/dev/null 2>&1 && node -v >/dev/null 2>&1; then
         return 0
     fi
-    if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-        echo "[agy] Node.js runtime not installed yet. Running 'agy setup'..."
-        "$PREFIX/bin/agy" setup
-    else
-        echo "[agy] Installing official agent CLI engine (@google/gemini-cli)..."
-        npm install -g --omit=optional @google/gemini-cli
+    echo "[agy] Updating base runtime libraries (libc++, openssl, nodejs-lts)..."
+    export DEBIAN_FRONTEND=noninteractive
+    pkg update -y && pkg upgrade -y -o Dpkg::Options::=--force-confold
+    pkg install -y -o Dpkg::Options::=--force-confold libc++ nodejs-lts
+}
+
+ensure_agent_cli() {
+    if [ -x "$HOME_DIR/.local/bin/agy" ]; then
+        return 0
     fi
+    ensure_working_node
+    if command -v gemini >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "[agy] Installing official agent CLI engine (@google/gemini-cli)..."
+    npm install -g --omit=optional @google/gemini-cli
 }
 
 case "${1:-}" in
@@ -483,9 +492,11 @@ case "${1:-}" in
         exit $?
         ;;
     --setup|setup)
-        echo "[agy] Installing native arm64-v8a toolchain (git, nodejs-lts, zstd, zsh, tmux, ripgrep, jq)..."
+        echo "[agy] Upgrading base Termux runtime (libc++, openssl, core libs)..."
         export DEBIAN_FRONTEND=noninteractive
-        pkg update -y && pkg install -y -o Dpkg::Options::=--force-confold git nodejs-lts zstd zsh tmux ripgrep jq
+        pkg update -y && pkg upgrade -y -o Dpkg::Options::=--force-confold
+        echo "[agy] Installing native arm64-v8a toolchain (git, nodejs-lts, zstd, zsh, tmux, ripgrep, jq)..."
+        pkg install -y -o Dpkg::Options::=--force-confold libc++ git nodejs-lts zstd zsh tmux ripgrep jq
         echo "[agy] Installing official AI Agent CLI engine (@google/gemini-cli)..."
         npm install -g --omit=optional @google/gemini-cli
         echo "[agy] Native toolchain & AI Agent CLI ready. Run 'agy login' to sign in with Google, or 'agy' to start."
@@ -494,8 +505,8 @@ case "${1:-}" in
     --upgrade|upgrade)
         echo "[agy] Upgrading all Termux packages..."
         export DEBIAN_FRONTEND=noninteractive
-        pkg upgrade -y -o Dpkg::Options::=--force-confold
-        if command -v npm >/dev/null 2>&1; then
+        pkg update -y && pkg upgrade -y -o Dpkg::Options::=--force-confold
+        if command -v node >/dev/null 2>&1 && node -v >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
             echo "[agy] Upgrading @google/gemini-cli..."
             npm install -g --omit=optional @google/gemini-cli
         fi
@@ -539,7 +550,7 @@ case "${1:-}" in
             echo "[agy] Token saved to 0600 vault."
             exit 0
         fi
-        if command -v node >/dev/null 2>&1 && [ -f "$PREFIX/etc/melcat/agy-oauth.js" ]; then
+        if command -v node >/dev/null 2>&1 && node -v >/dev/null 2>&1 && [ -f "$PREFIX/etc/melcat/agy-oauth.js" ]; then
             exec node "$PREFIX/etc/melcat/agy-oauth.js" "$@"
         fi
         echo "[agy] Launching native Google OAuth 2.0 Sign-In via Workstation..."
@@ -576,7 +587,11 @@ case "${1:-}" in
         echo "[agy] Doctor — $(uname -m) / Android $(getprop ro.build.version.release 2>/dev/null || echo '?')"
         for bin in git node npm gemini zstd zsh tmux rg jq; do
             if command -v "$bin" >/dev/null 2>&1; then
-                echo "  [ok]      $bin"
+                if [ "$bin" = "node" ] && ! node -v >/dev/null 2>&1; then
+                    echo "  [broken]  node (libc++ mismatch) -> run 'agy upgrade'"
+                else
+                    echo "  [ok]      $bin"
+                fi
             else
                 echo "  [missing] $bin  -> run 'agy setup'"
             fi
