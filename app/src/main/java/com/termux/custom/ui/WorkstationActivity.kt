@@ -463,7 +463,33 @@ private fun WorkstationRoot(
         isZenMode = false
     }
 
-    // Route `melcat.open_panel` extra from `agy ui`
+    var isOAuthInProgress by remember { mutableStateOf(false) }
+
+    fun startGoogleOAuthFlow() {
+        if (isOAuthInProgress) return
+        isOAuthInProgress = true
+        tokenDialogError = null
+        notify("Opening Google Sign-In in browser…", showSnackbar = true)
+        scope.launch {
+            try {
+                tokenWarden.signInWithGoogleOAuth(activity).onSuccess { updated ->
+                    tokenState = updated
+                    tokenDialogError = null
+                    isTokenDialogOpen = false
+                    val label = updated.accountEmail ?: updated.posixModeOctal
+                    notify("Signed in with Google ($label)", showSnackbar = true)
+                }.onFailure { err ->
+                    val msg = err.message ?: "Google OAuth failed"
+                    tokenDialogError = msg
+                    notify(msg, showSnackbar = true)
+                }
+            } finally {
+                isOAuthInProgress = false
+            }
+        }
+    }
+
+    // Route `melcat.open_panel` extra from `agy ui` / `agy login`
     LaunchedEffect(pendingPanelRoute) {
         when (pendingPanelRoute) {
             "agents" -> navigateToInspectorTab(InspectorTab.AGENTS)
@@ -471,6 +497,11 @@ private fun WorkstationRoot(
             "storage" -> navigateToInspectorTab(InspectorTab.STORAGE)
             "tutorial" -> isTutorialOpen = true
             "terminal" -> primaryTab = PrimaryTab.TERMINAL
+            "oauth_login" -> {
+                navigateToInspectorTab(InspectorTab.SHIELD)
+                isTokenDialogOpen = true
+                startGoogleOAuthFlow()
+            }
         }
         if (pendingPanelRoute != null) onConsumePanelRoute()
     }
@@ -1083,6 +1114,8 @@ private fun WorkstationRoot(
                 tokenDialogError = null
                 isTokenDialogOpen = false
             },
+            onGoogleOAuthSignIn = { startGoogleOAuthFlow() },
+            isOAuthInProgress = isOAuthInProgress,
             onSaveToken = { rawInput ->
                 scope.launch {
                     tokenWarden.provisionOrSyncToken(rawInput).onSuccess { updated ->

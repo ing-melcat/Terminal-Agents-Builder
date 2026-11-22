@@ -86,9 +86,9 @@ enum class TutorialStep(
     ),
     OAUTH_VAULT_0600(
         id = "oauth_vault_0600",
-        title = "3. Configurar OAuth Vault 0600",
-        body = "Guarda tu token OAuth de forma atómica con permisos POSIX 0600. Puedes hacerlo aquí (diálogo Vault) o en la terminal con `agy login` (entrada oculta). `agy token` verifica el estado y `agy logout` lo borra. Los agentes CLI lo heredan y queda excluido de snapshots.",
-        actionLabel = "Abrir Vault",
+        title = "3. Iniciar sesión con Google OAuth (0600)",
+        body = "Inicia sesión en 1 toque con Google OAuth 2.0 (abre el navegador y sincroniza ~/.gemini/oauth_creds.json + Vault 0600 automáticamente), o ejecuta `agy login` en la terminal. `agy` funciona directo como el CLI oficial.",
+        actionLabel = "Google OAuth / Vault",
     ),
     HYPEROS_PHANTOM_SHIELD(
         id = "hyperos_phantom_shield",

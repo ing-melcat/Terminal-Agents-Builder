@@ -24,6 +24,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -184,6 +185,8 @@ internal fun SearchableCommandPaletteDialog(
 internal fun TokenVaultDialog(
     currentState: OAuthTokenState,
     onDismiss: () -> Unit,
+    onGoogleOAuthSignIn: () -> Unit,
+    isOAuthInProgress: Boolean,
     onSaveToken: (String) -> Unit,
     onRevokeToken: () -> Unit,
     errorText: String?,
@@ -193,19 +196,42 @@ internal fun TokenVaultDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = WorkstationColors.SurfaceElevated,
-        title = { Text("OAuth Credentials Vault", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        title = { Text("Google OAuth 2.0 & Vault (0600)", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    text = "Stored atomically in private app storage with POSIX 0600 permissions and inherited by CLI agents. Excluded from all backup snapshots.",
+                    text = "Authenticate with your Google account in 1 tap (same official OAuth 2.0 flow as 'agy login' / Gemini CLI). Credentials are locked with POSIX 0600 permissions.",
                     fontSize = 12.sp,
                     color = WorkstationColors.TextSecondary,
+                )
+                Button(
+                    onClick = onGoogleOAuthSignIn,
+                    enabled = !isOAuthInProgress,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = WorkstationColors.AccentCyan,
+                        contentColor = WorkstationColors.VoidCanvas,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        text = if (isOAuthInProgress) "Waiting for Google Sign-In in browser…" else "Sign in with Google (OAuth 2.0)",
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                HorizontalDivider(thickness = 1.dp, color = WorkstationColors.BorderHairline)
+                Text(
+                    text = "Or paste an existing token / API key manually:",
+                    fontSize = 11.sp,
+                    color = WorkstationColors.TextMuted,
                 )
                 OutlinedTextField(
                     value = inputToken,
                     onValueChange = { inputToken = it },
-                    label = { Text("OAuth Token", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    label = { Text("OAuth Token / API Key", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     singleLine = true,
+                    enabled = !isOAuthInProgress,
                     isError = !errorText.isNullOrBlank(),
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(
@@ -226,7 +252,7 @@ internal fun TokenVaultDialog(
         confirmButton = {
             Button(
                 onClick = { onSaveToken(inputToken) },
-                enabled = inputToken.trim().length >= 8,
+                enabled = !isOAuthInProgress && inputToken.trim().length >= 8,
             ) {
                 Text("Lock 0600 & Sync", maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
@@ -236,6 +262,7 @@ internal fun TokenVaultDialog(
                 if (currentState.isPresent) {
                     TextButton(
                         onClick = onRevokeToken,
+                        enabled = !isOAuthInProgress,
                         colors = ButtonDefaults.textButtonColors(contentColor = WorkstationColors.AccentRose),
                     ) {
                         Text("Revoke", maxLines = 1, overflow = TextOverflow.Ellipsis)
