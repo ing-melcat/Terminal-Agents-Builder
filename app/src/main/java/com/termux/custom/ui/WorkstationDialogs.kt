@@ -84,6 +84,9 @@ internal fun SearchableCommandPaletteDialog(
     onOpenTokenVault: () -> Unit,
     onOpenCodingModelsVault: () -> Unit,
     onOpenSshPanel: () -> Unit,
+    onOpenRos2Space: () -> Unit,
+    onLaunchRos2Ai: (String) -> Unit,
+    onTeardownRos2Nodes: () -> Unit,
     onCheckAppUpdate: () -> Unit,
     onOpenTutorial: () -> Unit,
 ) {
@@ -94,11 +97,19 @@ internal fun SearchableCommandPaletteDialog(
     val latestOpenToken by rememberUpdatedState(onOpenTokenVault)
     val latestOpenCoding by rememberUpdatedState(onOpenCodingModelsVault)
     val latestOpenSsh by rememberUpdatedState(onOpenSshPanel)
+    val latestOpenRos2 by rememberUpdatedState(onOpenRos2Space)
+    val latestLaunchRos2Ai by rememberUpdatedState(onLaunchRos2Ai)
+    val latestTeardownRos2 by rememberUpdatedState(onTeardownRos2Nodes)
     val latestCheckUpdate by rememberUpdatedState(onCheckAppUpdate)
     val latestOpenTutorial by rememberUpdatedState(onOpenTutorial)
 
     val actions = remember(isZenMode) {
         listOf(
+            PaletteAction("ROS 2 Control Center (RUR)", "Switch to Ubuntu 24.04 + ROS 2 Jazzy offboard_ws & PAGE_RUR space", "", "ros2 rur rassor livekit offboard ubuntu slam nav2 foxglove", { latestOpenRos2() }),
+            PaletteAction("agy (Ubuntu ROS 2)", "Launch Google Antigravity CLI inside Ubuntu ROS 2 Jazzy workspace", "", "agy ros2 ai agent offboard rassor", { latestLaunchRos2Ai("agy") }),
+            PaletteAction("opencode (Ubuntu ROS 2)", "Launch OpenCode v2 inside Ubuntu ROS 2 Jazzy workspace", "", "opencode ros2 ai agent offboard rassor", { latestLaunchRos2Ai("opencode") }),
+            PaletteAction("workstation install-ros2", "Install Ubuntu 24.04 (proot-distro) + ROS 2 Jazzy + Foxglove + AI bridges", "", "install ros2 jazzy ubuntu proot slam nav2", { latestExec("workstation install-ros2") }),
+            PaletteAction("RUR Teardown ROS", "Stop all ros:* nodes & LiveKit receivers (keeps ros-ai:* & Dev tabs)", "", "teardown stop kill ros2 nodes livekit", { latestTeardownRos2() }),
             PaletteAction("agy", "Launch official Google Antigravity CLI (native arm64)", "", "antigravity cli agent", { latestExec("agy") }),
             PaletteAction("opencode", "Launch native Bionic OpenCode v2 coding agent", "", "opencode code coder qwen devstral", { latestExec("opencode") }),
             PaletteAction("Dispositivos SSH & Tailscale", "Connect to online LAN & Tailscale devices with 1 tap", "", "ssh tailscale lan remote jetson pi devices", { latestOpenSsh() }),
@@ -109,10 +120,10 @@ internal fun SearchableCommandPaletteDialog(
             PaletteAction("workstation skills push", "Commit & push improved skills to your remote Git repository", "", "skills push sync github backup", { latestExec("workstation skills push") }),
             PaletteAction("workstation install-opencode", "Install native Bionic OpenCode v2 via signed APT repo", "", "install opencode bionic apt", { latestExec("workstation install-opencode") }),
             PaletteAction("workstation setup", "Install native Antigravity CLI (agy) + glibc + toolchain", "", "setup install agy glibc", { latestExec("workstation setup") }),
-            PaletteAction("Workstation Doctor", "Verify agy, opencode, openssh, glibc, TLS, DNS & 0600 vaults", "", "doctor diagnose toolchain agy opencode ssh", { latestExec("workstation doctor") }),
+            PaletteAction("Workstation Doctor", "Verify agy, opencode, openssh, ros2, glibc, TLS & 0600 vaults", "", "doctor diagnose toolchain agy opencode ssh ros2", { latestExec("workstation doctor") }),
             PaletteAction("agy update", "Self-update native Antigravity CLI binary", "", "update upgrade agy", { latestExec("agy update") }),
             PaletteAction("zellij", "Start Zellij terminal multiplexer", "", "", { latestExec("zellij") }),
-            PaletteAction("New Terminal Session", "Spawn an isolated native PTY shell tab", "^⇧T", "", { latestNewPty() }),
+            PaletteAction("New Terminal Session", "Spawn an isolated PTY shell tab in the active space", "^⇧T", "", { latestNewPty() }),
             PaletteAction(if (isZenMode) "Exit Zen Mode" else "Enter Zen Mode", "Expand terminal canvas across full display", "^⇧B", "", { latestToggleZen() }),
             PaletteAction("Clean Caches (melcat-gc)", "Purge apt/pip/npm caches and zstd-compress old logs", "", "", { latestExec("melcat-gc") }),
             PaletteAction("Portable Snapshot", "Create secret-free tar.zst workspace archive", "", "", { latestExec("melcat-gc --snapshot") }),

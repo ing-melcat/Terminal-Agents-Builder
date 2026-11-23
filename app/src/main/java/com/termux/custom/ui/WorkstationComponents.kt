@@ -196,6 +196,7 @@ internal fun SessionTabStrip(
     onSelect: (Int) -> Unit,
     onAdd: () -> Unit,
     onCloseSession: (Int) -> Unit,
+    emptyLabel: String = "Initializing runtime…",
 ) {
     Surface(
         color = WorkstationColors.SurfaceBase,
@@ -209,6 +210,7 @@ internal fun SessionTabStrip(
                 onSelect = onSelect,
                 onAdd = onAdd,
                 onCloseSession = onCloseSession,
+                emptyLabel = emptyLabel,
                 modifier = Modifier
                     .fillMaxWidth()
                     .windowInsetsPadding(
@@ -233,6 +235,7 @@ internal fun SessionTabStripRow(
     onAdd: () -> Unit,
     onCloseSession: (Int) -> Unit,
     modifier: Modifier = Modifier,
+    emptyLabel: String = "Initializing runtime…",
 ) {
     val haptics = LocalHapticFeedback.current
     Row(
@@ -258,7 +261,7 @@ internal fun SessionTabStripRow(
                             .background(WorkstationColors.AccentAmber)
                     )
                     Text(
-                        text = "Initializing runtime…",
+                        text = emptyLabel,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 11.sp,
                         color = WorkstationColors.TextSecondary,
@@ -377,6 +380,7 @@ internal fun TactileExtraKeysDock(
     slim: Boolean,
     onQuickCommand: (String) -> Unit,
     contentInsets: WindowInsets = WindowInsets(0),
+    ros2Mode: Boolean = false,
 ) {
     val haptics = LocalHapticFeedback.current
     val keyHeight = if (slim) 27.dp else 32.dp
@@ -454,16 +458,37 @@ internal fun TactileExtraKeysDock(
                             modifier = Modifier.height(18.dp),
                         )
 
-                        TactileKeycap("agy", height = keyHeight, accentColor = WorkstationColors.AccentGold) {
-                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                            onQuickCommand("agy")
-                        }
-                        TactileKeycap("opencode", height = keyHeight, accentColor = WorkstationColors.AccentEmerald) {
-                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                            onQuickCommand("opencode")
-                        }
-                        TactileKeycap("zellij", height = keyHeight) {
-                            onQuickCommand("zellij")
+                        if (ros2Mode) {
+                            TactileKeycap("topics", height = keyHeight, accentColor = WorkstationColors.AccentGold) {
+                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                onQuickCommand("ros2 topic list -v")
+                            }
+                            TactileKeycap("nodes", height = keyHeight) {
+                                onQuickCommand("ros2 node list")
+                            }
+                            TactileKeycap("clear", height = keyHeight) {
+                                onQuickCommand("clear")
+                            }
+                            TactileKeycap("agy", height = keyHeight, accentColor = WorkstationColors.AccentGold) {
+                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                onQuickCommand("agy")
+                            }
+                            TactileKeycap("opencode", height = keyHeight, accentColor = WorkstationColors.AccentEmerald) {
+                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                onQuickCommand("opencode")
+                            }
+                        } else {
+                            TactileKeycap("agy", height = keyHeight, accentColor = WorkstationColors.AccentGold) {
+                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                onQuickCommand("agy")
+                            }
+                            TactileKeycap("opencode", height = keyHeight, accentColor = WorkstationColors.AccentEmerald) {
+                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                onQuickCommand("opencode")
+                            }
+                            TactileKeycap("zellij", height = keyHeight) {
+                                onQuickCommand("zellij")
+                            }
                         }
                         Spacer(modifier = Modifier.width(18.dp))
                     }
@@ -826,8 +851,147 @@ internal fun CompactHelpKeycap(
     }
 }
 
+@Composable
+internal fun WorkspaceSpaceSwitcher(
+    activeSpace: WorkstationSpace,
+    compact: Boolean,
+    onSelectSpace: (WorkstationSpace) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val haptics = LocalHapticFeedback.current
+    Surface(
+        shape = RoundedCornerShape(9.dp),
+        color = WorkstationColors.SurfaceKeycap,
+        border = BorderStroke(1.dp, WorkstationColors.BorderHairline),
+        modifier = modifier.height(if (compact) 30.dp else 32.dp),
+    ) {
+        Row(
+            modifier = Modifier.padding(2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            WorkstationSpace.entries.forEach { space ->
+                val selected = space == activeSpace
+                val isRos = space == WorkstationSpace.ROS2_CONTROL
+                val fill = when {
+                    selected && isRos -> WorkstationColors.AccentEmeraldWash
+                    selected -> WorkstationColors.AccentGoldWash
+                    else -> Color.Transparent
+                }
+                val fg = when {
+                    selected && isRos -> WorkstationColors.AccentEmerald
+                    selected -> WorkstationColors.AccentGold
+                    else -> WorkstationColors.TextSecondary
+                }
+                val border = when {
+                    selected && isRos -> BorderStroke(1.dp, WorkstationColors.AccentEmerald.copy(alpha = 0.45f))
+                    selected -> BorderStroke(1.dp, WorkstationColors.BorderStrong)
+                    else -> null
+                }
+                Surface(
+                    shape = RoundedCornerShape(7.dp),
+                    color = fill,
+                    border = border,
+                    modifier = Modifier
+                        .height(if (compact) 26.dp else 28.dp)
+                        .clickable {
+                            if (!selected) {
+                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                onSelectSpace(space)
+                            }
+                        },
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = if (compact) 8.dp else 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        if (isRos) {
+                            Icon(
+                                imageVector = WorkstationIcons.Robotics,
+                                contentDescription = null,
+                                tint = fg,
+                                modifier = Modifier.size(13.dp),
+                            )
+                        }
+                        Text(
+                            text = if (compact) space.shortLabel else space.label,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = if (compact) 10.sp else 11.sp,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                            color = fg,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun Ros2InspectorHeader(
+    showSshPi: Boolean,
+    onSelectShowSshPi: (Boolean) -> Unit,
+) {
+    val haptics = LocalHapticFeedback.current
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        listOf(false to "Control ROS 2", true to "SSH Pi").forEach { (isSsh, title) ->
+            val selected = showSshPi == isSsh
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = if (selected) {
+                    if (isSsh) WorkstationColors.AccentGoldWash else WorkstationColors.AccentEmeraldWash
+                } else {
+                    WorkstationColors.SurfaceKeycap
+                },
+                border = BorderStroke(
+                    1.dp,
+                    if (selected) {
+                        if (isSsh) WorkstationColors.BorderStrong else WorkstationColors.AccentEmerald.copy(alpha = 0.5f)
+                    } else {
+                        WorkstationColors.BorderHairline
+                    },
+                ),
+                modifier = Modifier
+                    .weight(1f)
+                    .height(34.dp)
+                    .clickable {
+                        if (!selected) {
+                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onSelectShowSshPi(isSsh)
+                        }
+                    },
+            ) {
+                Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(horizontal = 8.dp)) {
+                    Text(
+                        text = title,
+                        fontSize = 11.sp,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                        color = if (selected) {
+                            if (isSsh) WorkstationColors.AccentGold else WorkstationColors.AccentEmerald
+                        } else {
+                            WorkstationColors.TextSecondary
+                        },
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
+}
+
 internal fun tabIcon(tab: PrimaryTab): ImageVector = when (tab) {
     PrimaryTab.TERMINAL -> WorkstationIcons.TerminalPrompt
+    PrimaryTab.ROS_CONTROL -> WorkstationIcons.Robotics
     PrimaryTab.AGENTS -> WorkstationIcons.AgentsLayers
     PrimaryTab.SSH -> WorkstationIcons.SshNodes
     PrimaryTab.SHIELD -> WorkstationIcons.ShieldGuard

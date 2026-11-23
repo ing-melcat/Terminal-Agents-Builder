@@ -6,13 +6,13 @@
 
 ### Estación de Trabajo Móvil Nativa ARM64 para Agentes de Programación IA, Terminal 120Hz y Control SSH / Tailscale
 
-[![Release](https://img.shields.io/badge/Release-v1.2-F2BA0B?style=for-the-badge&logo=github&logoColor=060A0F)](https://github.com/ing-melcat/Terminal-Agents-Builder/releases/latest)
+[![Release](https://img.shields.io/badge/Release-v2.0-F2BA0B?style=for-the-badge&logo=github&logoColor=060A0F)](https://github.com/ing-melcat/Terminal-Agents-Builder/releases/latest)
 [![Android ARM64](https://img.shields.io/badge/Android-arm64--v8a%20(API%2024%2B)-34D399?style=for-the-badge&logo=android&logoColor=060A0F)](https://github.com/ing-melcat/Terminal-Agents-Builder/releases/latest)
-[![Base](https://img.shields.io/badge/Base-Termux%20Nativo%20(Zero%20proot)-0B1016?style=for-the-badge&logo=gnubash&logoColor=F2BA0B)](#-por-qué-es-un-termux-potenciado)
+[![Base](https://img.shields.io/badge/Base-Termux%20Nativo%20%2B%20ROS%202%20Jazzy-0B1016?style=for-the-badge&logo=gnubash&logoColor=F2BA0B)](#-por-qué-es-un-termux-potenciado)
 [![Stack](https://img.shields.io/badge/Kotlin%202.0%20%7C%20Jetpack%20Compose%20%7C%20C%2FJNI-111821?style=for-the-badge&logo=kotlin&logoColor=F2BA0B)](#-lenguajes-stack-tecnológico-y-arquitectura)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-F8FAFC?style=for-the-badge&logo=gnu&logoColor=060A0F)](LICENSE.md)
 
-**Construido sobre el motor POSIX nativo de Termux — rediseñado y potenciado como una estación de ingeniería de 120Hz con Antigravity CLI (`agy`), OpenCode v2, Claude CLI, bóveda directa `0600` (DeepSeek, Anthropic/Claude, OpenAI, OpenRouter, Mistral, modelos gratis `$0` y Ollama LAN), editor visual + gestor Git de Skills y panel SSH Pro + Tailscale con túneles `-L` y `ssh-copy-id` en 1 toque.**
+**Construido sobre el motor POSIX nativo de Termux — ahora en `v2.0` con arquitectura *Dos Mundos* (`Dev & IA` ↔ `ROS 2`): estación nativa ARM64 120Hz con `agy`, `opencode`, `claude`, bóveda `0600`, SSH Pro + Tailscale, y un espacio dedicado de Ubuntu 24.04 + ROS 2 Jazzy (`offboard_ws`) con Login de Operador emparejado a la BD de `PAGE_RUR` (contraseña/2FA), receptores LiveKit editables, Foxglove 3D y agentes IA corriendo directo sobre tus tópicos ROS 2.**
 
 [Descargar APK (`arm64-v8a`)](https://github.com/ing-melcat/Terminal-Agents-Builder/releases/latest) · [Capturas de Pantalla](#-capturas-de-la-aplicación) · [Agentes y Modelos IA](#-agentes-y-modelos-de-programación-gratis--económicos--pro--locales) · [Panel SSH Pro & Tailscale](#-panel-dedicado-ssh-pro--tailscale-vpn) · [Creador](#-creador)
 
@@ -30,9 +30,9 @@
 
 ## ¿Qué es Terminal Agents Builder?
 
-**Terminal Agents Builder (RUR Edition)** convierte tu smartphone o tablet Android (`arm64-v8a`) en una **estación de trabajo portátil de ingeniería de software y robótica** capaz de ejecutar agentes autónomos de código, administrar repositorios reales y conectarse por SSH a tus servidores, Jetson, Raspberry Pi o PCs de laboratorio sin depender de una laptop.
+**Terminal Agents Builder (RUR Edition)** convierte tu smartphone o tablet Android (`arm64-v8a`) en una **estación de trabajo portátil de ingeniería de software y robótica** capaz de ejecutar agentes autónomos de código, administrar repositorios reales, operar el **Centro de Control ROS 2 Jazzy (`offboard_ws`)** del Rover RASSOR con receptores LiveKit y conectarse por SSH/Tailscale a tus Raspberry Pi, Jetson o servidores de laboratorio.
 
-A diferencia de soluciones basadas en contenedores pesados (`proot-distro`) o emuladores lentos, esta aplicación conserva intacto el **núcleo nativo de `termux-app`** (misma arquitectura POSIX, compatibilidad total con `pkg`/`apt` y cero sobrecarga de emulación) y construye encima una **capa de workstation moderna en Kotlin + Jetpack Compose** con identidad visual *Aerospace Carbon & Gold* inspirada en el emblema oficial de la **Research Unit of Robotics (RUR · UNIPOLI)**.
+El espacio **`Dev & IA`** conserva intacto el **núcleo nativo de `termux-app`** (cero `proot`, 100% compatible con `pkg`/`apt` y sin login global), mientras que el nuevo espacio **`ROS 2`** levanta un entorno opcional dedicado de **Ubuntu 24.04 + ROS 2 Jazzy (`proot-distro`)** autenticado contra la base de datos de `PAGE_RUR` (`rur.unipolidgo.edu.mx`, contraseña o código 2FA) y compartiendo `$HOME`, skills y bóvedas `0600` con `agy` y `opencode`.
 
 ---
 
@@ -40,16 +40,17 @@ A diferencia de soluciones basadas en contenedores pesados (`proot-distro`) o em
 
 Conserva todo el poder y compatibilidad de Termux clásico (incluyendo acceso directo en 1 toque a `Classic Shell`), pero añade capacidades de estación de trabajo que normalmente requieren horas de configuración manual:
 
-| Capacidad | Termux Clásico | **Terminal Agents Builder (RUR Edition)** |
+| Capacidad | Termux Clásico | **Terminal Agents Builder (RUR Edition `v2.0`)** |
 | :--- | :---: | :--- |
-| **Motor Linux `arm64-v8a` nativo (`$PREFIX`, `pkg`/`apt`)** | ✅ | ✅ **100% intacto (`termux.c` sin tocar, cero `proot`)** |
+| **Motor Linux `arm64-v8a` nativo (`$PREFIX`, `pkg`/`apt`)** | ✅ | ✅ **100% intacto (`termux.c` sin tocar, cero `proot` en `Dev & IA`)** |
+| **Espacio dedicado `ROS 2` (Ubuntu 24.04 + ROS 2 Jazzy `offboard_ws`)** | ❌ Manual | ✅ **Pestañas independientes**, instalador 1-toque `workstation install-ros2`, **Login Operador `PAGE_RUR` (BD + 2FA)**, **Receptores LiveKit editables**, **Foxglove 3D (:8765)**, **Teardown ROS** y **`agy`/`opencode` dentro de ROS 2** |
 | **Interfaz Adaptativa 120Hz / 144Hz (Teléfono + Tablet)** | ❌ Básica | ✅ **4 layouts nativos** (Phone Portrait/Landscape, Tablet Sheet y **Split-Pane Desktop + Modo Zen `^⇧B`**) |
-| **Agentes IA listos en 1 toque (`agy`, `opencode`, `claude`)** | ❌ Manual | ✅ **Hub de Agentes Nativos** + instalador `workstation` + **Editor visual `SKILL.md` & Gestor Git de Skills** (`rebase + autostash`) |
+| **Agentes IA listos en 1 toque (`agy`, `opencode`, `claude`)** | ❌ Manual | ✅ **Hub de Agentes Nativos** + instalador `workstation` + **Editor visual `SKILL.md` & Gestor Git de Skills** (`rur-ros2-rassor`, `rebase + autostash`) |
 | **Selector de Modelos de Código (Gratis `$0` / Direct API / Ollama)** | ❌ Manual | ✅ **Catálogo curado + bóveda `0600` directa** para **DeepSeek, Anthropic/Claude, OpenAI, OpenRouter, Mistral y Ollama LAN** (`{file:...}`) |
-| **Panel dedicado SSH Pro & Tailscale en vivo** | ❌ Solo CLI | ✅ **Sonda TCP paralela (`ONLINE · XXms`)**, VPN Tailscale, **`ssh-copy-id` en 1 toque**, **túneles locales `-L`**, comando inicial (`tmux`) y pestaña PTY aislada |
+| **Panel dedicado SSH Pro & Tailscale en vivo** | ❌ Solo CLI | ✅ **Sonda TCP paralela (`ONLINE · XXms`)**, VPN Tailscale, **`ssh-copy-id` en 1 toque**, **túneles locales `-L`**, comando inicial (`tmux`) y acceso directo desde `ROS 2` |
 | **Protección HyperOS / MIUI / Phantom Process Killer** | ❌ Manual | ✅ **Workstation Shield (`0–100%`)**: `WakeLock`, Wi-Fi baja latencia, exclusión Doze, Autostart y fix ADB |
 | **Sincronización de Workspaces entre Celular y Tablet** | ❌ No | ✅ **CRDT Local-First (SQLite WAL + relojes de Lamport)** con exportación/importación P2P sin conflictos |
-| **Limpieza de cachés y Backups portables sin secretos** | ❌ Manual | ✅ **`melcat-gc` + Snapshots `.tar.zst` (`0600`)** excluyendo OAuth, API keys y llaves `~/.ssh` |
+| **Limpieza de cachés y Backups portables sin secretos** | ❌ Manual | ✅ **`melcat-gc` + Snapshots `.tar.zst` (`0600`)** excluyendo OAuth, API keys, sesiones `PAGE_RUR` y llaves `~/.ssh` |
 | **Actualizaciones firmadas OTA con SHA-256** | ❌ Manual | ✅ **GitHub Releases OTA firmados con llave privada RUR**, verificación **SHA-256** y **detector de plugins Termux en conflicto** |
 
 ---

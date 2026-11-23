@@ -69,6 +69,12 @@ import com.termux.custom.data.LocalFirstCrdtDatabase
 import com.termux.custom.guardian.GuardianStatus
 import com.termux.custom.guardian.ProcessGuardianService
 import com.termux.custom.provisioning.CustomBootstrapProvisioner
+import com.termux.custom.rur.Rur2faSetupPayload
+import com.termux.custom.rur.RurControlCatalog
+import com.termux.custom.rur.RurControlCenterManager
+import com.termux.custom.rur.RurControlState
+import com.termux.custom.rur.RurModuleSpec
+import com.termux.custom.rur.RurStackSpec
 import com.termux.custom.security.AntigravityTokenWarden
 import com.termux.custom.security.OAuthTokenState
 import com.termux.custom.skills.SkillsRepoManager
@@ -82,8 +88,12 @@ import com.termux.custom.updater.ConflictingAddonInfo
 import com.termux.custom.updater.GitHubReleaseUpdater
 import com.termux.custom.updater.UpdateState
 import com.termux.shared.termux.TermuxConstants
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 class WorkstationActivity : ComponentActivity(), ServiceConnection {
@@ -100,6 +110,7 @@ class WorkstationActivity : ComponentActivity(), ServiceConnection {
     private lateinit var codingAgentsManager: CodingAgentsManager
     private lateinit var skillsRepoManager: SkillsRepoManager
     private lateinit var sshDevicesManager: SshDevicesManager
+    private lateinit var rurControlManager: RurControlCenterManager
     private lateinit var storageOptimizer: StorageOptimizer
     private lateinit var releaseUpdater: GitHubReleaseUpdater
 
@@ -120,6 +131,7 @@ class WorkstationActivity : ComponentActivity(), ServiceConnection {
         codingAgentsManager = CodingAgentsManager()
         skillsRepoManager = SkillsRepoManager()
         sshDevicesManager = SshDevicesManager(context = this)
+        rurControlManager = RurControlCenterManager()
         storageOptimizer = StorageOptimizer()
         releaseUpdater = GitHubReleaseUpdater(this)
         bootstrapReady = CustomBootstrapProvisioner.isBootstrapInstalled()
@@ -145,6 +157,7 @@ class WorkstationActivity : ComponentActivity(), ServiceConnection {
                     codingAgentsManager = codingAgentsManager,
                     skillsRepoManager = skillsRepoManager,
                     sshDevicesManager = sshDevicesManager,
+                    rurControlManager = rurControlManager,
                     storageOptimizer = storageOptimizer,
                     releaseUpdater = releaseUpdater,
                 )
@@ -270,6 +283,7 @@ private fun WorkstationRoot(
     codingAgentsManager: CodingAgentsManager,
     skillsRepoManager: SkillsRepoManager,
     sshDevicesManager: SshDevicesManager,
+    rurControlManager: RurControlCenterManager,
     storageOptimizer: StorageOptimizer,
     releaseUpdater: GitHubReleaseUpdater,
 ) {
@@ -291,11 +305,15 @@ private fun WorkstationRoot(
     val isImeVisible = WindowInsets.ime.getBottom(density) > 0
 
     // Decoupled saveable state — synced across phone/tablet rotations
+    var activeSpace by rememberSaveable { mutableStateOf(WorkstationSpace.DEV_AI) }
+    var ros2InspectorShowSsh by rememberSaveable { mutableStateOf(false) }
     var primaryTab by rememberSaveable { mutableStateOf(PrimaryTab.TERMINAL) }
     var inspectorTab by rememberSaveable { mutableStateOf(InspectorTab.AGENTS) }
     var isZenMode by rememberSaveable { mutableStateOf(false) }
     var isPortraitSheetOpen by rememberSaveable { mutableStateOf(false) }
     var activeSessionIndex by rememberSaveable { mutableIntStateOf(0) }
+    var lastDevSessionIndex by rememberSaveable { mutableIntStateOf(0) }
+    var lastRos2SessionIndex by rememberSaveable { mutableIntStateOf(-1) }
     var sessionListVersion by remember { mutableIntStateOf(0) }
     var sessionRespawnTick by remember { mutableIntStateOf(0) }
 
@@ -310,6 +328,22 @@ private fun WorkstationRoot(
     var completedTutorialSteps by remember {
         mutableStateOf(TutorialProgressStore.loadCompletedIds(context))
     }
+
+    // RUR ROS 2 Control Center state
+    var rurState by remember { mutableStateOf(RurControlState()) }
+    var isRurAuthBusy by remember { mutableStateOf(false) }
+    var rurAuthError by remember { mutableStateOf<String?>(null) }
+    var isRurSyncBusy by remember { mutableStateOf(false) }
+    var isRurConfigDialogOpen by rememberSaveable { mutableStateOf(false) }
+    var isRurConfigSaving by remember { mutableStateOf(false) }
+    var rurConfigError by remember { mutableStateOf<String?>(null) }
+    var isAddRurRobotDialogOpen by rememberSaveable { mutableStateOf(false) }
+    var isAddRurRobotSaving by remember { mutableStateOf(false) }
+    var addRurRobotError by remember { mutableStateOf<String?>(null) }
+    var isRur2faDialogOpen by rememberSaveable { mutableStateOf(false) }
+    var isRur2faBusy by remember { mutableStateOf(false) }
+    var rur2faPayload by remember { mutableStateOf<Rur2faSetupPayload?>(null) }
+    var rur2faError by remember { mutableStateOf<String?>(null) }
 
     var isAgentsBusy by remember { mutableStateOf(false) }
     var isStorageBusy by remember { mutableStateOf(false) }
@@ -349,12 +383,18 @@ private fun WorkstationRoot(
             PrimaryTab.SSH -> inspectorTab = InspectorTab.SSH
             PrimaryTab.SHIELD -> inspectorTab = InspectorTab.SHIELD
             PrimaryTab.STORAGE -> inspectorTab = InspectorTab.STORAGE
+            PrimaryTab.ROS_CONTROL,
             PrimaryTab.TERMINAL -> Unit
         }
     }
 
     fun navigateToInspectorTab(tab: InspectorTab) {
         inspectorTab = tab
+        if (activeSpace == WorkstationSpace.ROS2_CONTROL && tab == InspectorTab.SSH) {
+            ros2InspectorShowSsh = true
+        } else if (activeSpace == WorkstationSpace.ROS2_CONTROL && tab != InspectorTab.SHIELD) {
+            activeSpace = WorkstationSpace.DEV_AI
+        }
         when (formFactor) {
             WorkstationFormFactor.PHONE_PORTRAIT,
             WorkstationFormFactor.PHONE_LANDSCAPE -> {
@@ -422,10 +462,16 @@ private fun WorkstationRoot(
     val isSshPanelVisible = when (formFactor) {
         WorkstationFormFactor.PHONE_PORTRAIT,
         WorkstationFormFactor.PHONE_LANDSCAPE -> primaryTab == PrimaryTab.SSH
-        WorkstationFormFactor.TABLET_PORTRAIT -> isPortraitSheetOpen && inspectorTab == InspectorTab.SSH
-        WorkstationFormFactor.TABLET_LANDSCAPE -> !isZenMode && inspectorTab == InspectorTab.SSH
+        WorkstationFormFactor.TABLET_PORTRAIT -> isPortraitSheetOpen && (
+            (activeSpace == WorkstationSpace.DEV_AI && inspectorTab == InspectorTab.SSH) ||
+                (activeSpace == WorkstationSpace.ROS2_CONTROL && ros2InspectorShowSsh)
+            )
+        WorkstationFormFactor.TABLET_LANDSCAPE -> !isZenMode && (
+            (activeSpace == WorkstationSpace.DEV_AI && inspectorTab == InspectorTab.SSH) ||
+                (activeSpace == WorkstationSpace.ROS2_CONTROL && ros2InspectorShowSsh)
+            )
     }
-    val isAgentsPanelVisible = when (formFactor) {
+    val isAgentsPanelVisible = activeSpace == WorkstationSpace.DEV_AI && when (formFactor) {
         WorkstationFormFactor.PHONE_PORTRAIT,
         WorkstationFormFactor.PHONE_LANDSCAPE -> primaryTab == PrimaryTab.AGENTS
         WorkstationFormFactor.TABLET_PORTRAIT -> isPortraitSheetOpen && inspectorTab == InspectorTab.AGENTS
@@ -503,8 +549,12 @@ private fun WorkstationRoot(
         )
     }
 
+    val latestTermuxService by rememberUpdatedState(termuxService)
+    val latestRurState by rememberUpdatedState(rurState)
+    val latestActiveSpace by rememberUpdatedState(activeSpace)
+
     fun spawnNewPtySession(sessionName: String? = null) {
-        val service = termuxService ?: return
+        val service = latestTermuxService ?: return
         if (!bootstrapReady && !CustomBootstrapProvisioner.isBootstrapInstalled()) {
             onEnsureBootstrap()
             notify("Extracting arm64 Linux runtime…")
@@ -522,15 +572,392 @@ private fun WorkstationRoot(
             )
         }.getOrNull()
         if (created != null) {
-            activeSessionIndex = (service.termuxSessions.size - 1).coerceAtLeast(0)
+            val newIdx = (service.termuxSessions.size - 1).coerceAtLeast(0)
+            activeSessionIndex = newIdx
+            lastDevSessionIndex = newIdx
             sessionListVersion++
             primaryTab = PrimaryTab.TERMINAL
             notify("Opened session ${sessionName ?: "agy-$nextNum"}")
         }
     }
 
+    fun spawnInstallRos2Session() {
+        val service = latestTermuxService
+        if (!bootstrapReady && !CustomBootstrapProvisioner.isBootstrapInstalled()) {
+            onEnsureBootstrap()
+            notify("Extracting arm64 Linux runtime…")
+            return
+        }
+        if (service == null) {
+            notify("TermuxService aún iniciando…", showSnackbar = true)
+            return
+        }
+        val existingIdx = service.termuxSessions.indexOfFirst {
+            it.terminalSession.mSessionName == "ros:install" && it.terminalSession.isRunning
+        }
+        if (existingIdx >= 0) {
+            activeSpace = WorkstationSpace.ROS2_CONTROL
+            activeSessionIndex = existingIdx
+            lastRos2SessionIndex = existingIdx
+            primaryTab = PrimaryTab.TERMINAL
+            isPortraitSheetOpen = false
+            notify("Instalación ROS 2 Jazzy ya en curso", showSnackbar = true)
+            return
+        }
+        val (shBin, argv) = rurControlManager.buildInstallRos2PtyExec()
+        val created = runCatching {
+            service.createTermuxSession(
+                shBin,
+                argv,
+                null,
+                TermuxConstants.TERMUX_HOME_DIR_PATH,
+                false,
+                "ros:install",
+            )
+        }.getOrNull()
+        if (created != null) {
+            val newIdx = (service.termuxSessions.size - 1).coerceAtLeast(0)
+            activeSpace = WorkstationSpace.ROS2_CONTROL
+            activeSessionIndex = newIdx
+            lastRos2SessionIndex = newIdx
+            sessionListVersion++
+            primaryTab = PrimaryTab.TERMINAL
+            isPortraitSheetOpen = false
+            notify("Instalando Ubuntu 24.04 + ROS 2 Jazzy…", showSnackbar = true)
+        } else {
+            notify("No se pudo abrir la pestaña de instalación ROS 2", showSnackbar = true)
+        }
+    }
+
+    fun spawnRos2ShellSession() {
+        val service = latestTermuxService
+        if (!bootstrapReady && !CustomBootstrapProvisioner.isBootstrapInstalled()) {
+            onEnsureBootstrap()
+            notify("Extracting arm64 Linux runtime…")
+            return
+        }
+        if (service == null) {
+            notify("TermuxService aún iniciando…", showSnackbar = true)
+            return
+        }
+        val currentRur = latestRurState
+        if (!currentRur.ros2Ready) {
+            spawnInstallRos2Session()
+            return
+        }
+        scope.launch {
+            val execPair = runCatching {
+                withContext(Dispatchers.IO) { rurControlManager.buildRos2InteractiveShellExec(currentRur) }
+            }.getOrElse { err ->
+                notify(err.message ?: "Error preparando shell ROS 2", showSnackbar = true)
+                return@launch
+            }
+            val liveService = latestTermuxService
+            if (liveService == null) {
+                withContext(Dispatchers.IO) { rurControlManager.cleanupEphemeralEnvFromArgv(execPair.second) }
+                return@launch
+            }
+            val existingShells = liveService.termuxSessions.count {
+                (it.terminalSession.mSessionName ?: "").startsWith("ros:shell")
+            }
+            val title = if (existingShells == 0) "ros:shell" else "ros:shell-${existingShells + 1}"
+            val created = runCatching {
+                liveService.createTermuxSession(
+                    execPair.first,
+                    execPair.second,
+                    null,
+                    TermuxConstants.TERMUX_HOME_DIR_PATH,
+                    false,
+                    title,
+                )
+            }.getOrNull()
+            if (created != null) {
+                val newIdx = (liveService.termuxSessions.size - 1).coerceAtLeast(0)
+                activeSpace = WorkstationSpace.ROS2_CONTROL
+                activeSessionIndex = newIdx
+                lastRos2SessionIndex = newIdx
+                sessionListVersion++
+                primaryTab = PrimaryTab.TERMINAL
+                isPortraitSheetOpen = false
+                notify("Ubuntu 24.04 · ROS 2 Jazzy ($title)")
+            } else {
+                withContext(Dispatchers.IO) { rurControlManager.cleanupEphemeralEnvFromArgv(execPair.second) }
+                notify("No se pudo abrir la shell Ubuntu ROS 2", showSnackbar = true)
+            }
+        }
+    }
+
+    fun spawnRos2AiAgentSession(agentBinary: String) {
+        val service = latestTermuxService
+        if (!bootstrapReady && !CustomBootstrapProvisioner.isBootstrapInstalled()) {
+            onEnsureBootstrap()
+            notify("Extracting arm64 Linux runtime…")
+            return
+        }
+        if (service == null) {
+            notify("TermuxService aún iniciando…", showSnackbar = true)
+            return
+        }
+        val currentRur = latestRurState
+        scope.launch {
+            val execPair = runCatching {
+                withContext(Dispatchers.IO) { rurControlManager.buildRos2AiAgentPtyExec(agentBinary, currentRur) }
+            }.getOrElse { err ->
+                notify(err.message ?: "Error iniciando $agentBinary en ROS 2", showSnackbar = true)
+                return@launch
+            }
+            val liveService = latestTermuxService
+            if (liveService == null) {
+                withContext(Dispatchers.IO) { rurControlManager.cleanupEphemeralEnvFromArgv(execPair.second) }
+                return@launch
+            }
+            val prefix = "ros-ai:$agentBinary"
+            val existingCount = liveService.termuxSessions.count {
+                (it.terminalSession.mSessionName ?: "").startsWith(prefix)
+            }
+            val title = if (existingCount == 0) prefix else "$prefix-${existingCount + 1}"
+            val created = runCatching {
+                liveService.createTermuxSession(
+                    execPair.first,
+                    execPair.second,
+                    null,
+                    TermuxConstants.TERMUX_HOME_DIR_PATH,
+                    false,
+                    title,
+                )
+            }.getOrNull()
+            if (created != null) {
+                val newIdx = (liveService.termuxSessions.size - 1).coerceAtLeast(0)
+                activeSpace = WorkstationSpace.ROS2_CONTROL
+                activeSessionIndex = newIdx
+                lastRos2SessionIndex = newIdx
+                sessionListVersion++
+                primaryTab = PrimaryTab.TERMINAL
+                isPortraitSheetOpen = false
+                notify("$agentBinary abierto en Ubuntu ROS 2", showSnackbar = true)
+            } else {
+                withContext(Dispatchers.IO) { rurControlManager.cleanupEphemeralEnvFromArgv(execPair.second) }
+                notify("No se pudo abrir $agentBinary en ROS 2", showSnackbar = true)
+            }
+        }
+    }
+
+    suspend fun spawnRos2ModuleSuspending(
+        module: RurModuleSpec,
+        focusTerminal: Boolean = true,
+        suppressMissingReceiverHint: Boolean = false,
+    ): Boolean {
+        val service = latestTermuxService
+        if (!bootstrapReady && !CustomBootstrapProvisioner.isBootstrapInstalled()) {
+            onEnsureBootstrap()
+            notify("Extracting arm64 Linux runtime…")
+            return false
+        }
+        if (service == null) {
+            notify("TermuxService aún iniciando…", showSnackbar = true)
+            return false
+        }
+        val currentRur = latestRurState
+        if (!currentRur.ros2Ready) {
+            spawnInstallRos2Session()
+            return false
+        }
+        // Anti-duplicate guard: if module is already running, focus it cleanly
+        val runningIdx = service.termuxSessions.indexOfFirst {
+            it.terminalSession.mSessionName == module.tabTitle && it.terminalSession.isRunning
+        }
+        if (runningIdx >= 0) {
+            activeSpace = WorkstationSpace.ROS2_CONTROL
+            activeSessionIndex = runningIdx
+            lastRos2SessionIndex = runningIdx
+            if (focusTerminal) {
+                primaryTab = PrimaryTab.TERMINAL
+                isPortraitSheetOpen = false
+            }
+            if (!suppressMissingReceiverHint) {
+                notify("${module.label} ya está activo", showSnackbar = true)
+            }
+            return true
+        }
+
+        val hasActiveReceiver = service.termuxSessions.any {
+            RurControlCenterManager.isLiveKitReceiverSessionTitle(it.terminalSession.mSessionName) &&
+                it.terminalSession.isRunning
+        }
+        val missingReceiverHint = !suppressMissingReceiverHint && module.requiresLiveKitReceiver && !hasActiveReceiver
+
+        val execPair = runCatching {
+            withContext(Dispatchers.IO) { rurControlManager.buildModulePtyExec(module, currentRur) }
+        }.getOrElse { err ->
+            notify(err.message ?: "Error preparando ${module.label}", showSnackbar = true)
+            return false
+        }
+        val liveService = latestTermuxService
+        if (liveService == null) {
+            withContext(Dispatchers.IO) { rurControlManager.cleanupEphemeralEnvFromArgv(execPair.second) }
+            return false
+        }
+        // Re-check anti-duplicate after IO hop
+        val raceIdx = liveService.termuxSessions.indexOfFirst {
+            it.terminalSession.mSessionName == module.tabTitle && it.terminalSession.isRunning
+        }
+        if (raceIdx >= 0) {
+            withContext(Dispatchers.IO) { rurControlManager.cleanupEphemeralEnvFromArgv(execPair.second) }
+            activeSessionIndex = raceIdx
+            lastRos2SessionIndex = raceIdx
+            return true
+        }
+        val created = runCatching {
+            liveService.createTermuxSession(
+                execPair.first,
+                execPair.second,
+                null,
+                TermuxConstants.TERMUX_HOME_DIR_PATH,
+                false,
+                module.tabTitle,
+            )
+        }.getOrNull()
+        if (created != null) {
+            val newIdx = (liveService.termuxSessions.size - 1).coerceAtLeast(0)
+            activeSpace = WorkstationSpace.ROS2_CONTROL
+            activeSessionIndex = newIdx
+            lastRos2SessionIndex = newIdx
+            sessionListVersion++
+            if (focusTerminal) {
+                primaryTab = PrimaryTab.TERMINAL
+                isPortraitSheetOpen = false
+            }
+            if (missingReceiverHint) {
+                notify("Aviso: sin receptor LiveKit activo — inicia uno arriba para ver tópicos", showSnackbar = true)
+            } else if (!suppressMissingReceiverHint) {
+                notify("ROS 2 → ${module.label}")
+            }
+            return true
+        } else {
+            withContext(Dispatchers.IO) { rurControlManager.cleanupEphemeralEnvFromArgv(execPair.second) }
+            notify("No se pudo abrir ${module.label}", showSnackbar = true)
+            return false
+        }
+    }
+
+    fun spawnRos2ModuleSession(module: RurModuleSpec, focusTerminal: Boolean = true) {
+        scope.launch { spawnRos2ModuleSuspending(module, focusTerminal = focusTerminal) }
+    }
+
+    fun spawnRos2Stack(stack: RurStackSpec) {
+        if (!latestRurState.ros2Ready) {
+            spawnInstallRos2Session()
+            return
+        }
+        val mods = stack.moduleIds.mapNotNull { RurControlCatalog.byId(it) }
+        if (mods.isEmpty()) return
+        scope.launch {
+            mods.forEachIndexed { i, mod ->
+                spawnRos2ModuleSuspending(
+                    module = mod,
+                    focusTerminal = i == mods.lastIndex,
+                    suppressMissingReceiverHint = true,
+                )
+                if (i < mods.lastIndex) {
+                    delay(350L)
+                }
+            }
+            notify("Stack lanzado: ${stack.label}", showSnackbar = true)
+        }
+    }
+
+    /**
+     * Stops ONLY `ros:*` node/receiver sessions. Explicitly preserves `ros-ai:*` AI sessions
+     * and ALL `Dev & IA` Termux sessions!
+     */
+    fun teardownRurNodeSessions(reason: String = "Teardown ROS"): Int {
+        val service = latestTermuxService ?: return 0
+        var stopped = 0
+        for (i in service.termuxSessions.lastIndex downTo 0) {
+            val session = service.termuxSessions[i].terminalSession
+            if (RurControlCenterManager.isRos2NodeSessionTitle(session.mSessionName)) {
+                runCatching {
+                    session.finishIfRunning()
+                    service.removeTermuxSession(session)
+                }
+                stopped++
+            }
+        }
+        if (stopped > 0) {
+            val remaining = service.termuxSessions
+            val nextIdx = remaining.indexOfFirst {
+                RurControlCenterManager.isRos2SessionTitle(it.terminalSession.mSessionName)
+            }.takeIf { it >= 0 } ?: remaining.indices.firstOrNull() ?: 0
+            activeSessionIndex = nextIdx
+            if (remaining.isEmpty()) {
+                sessionRespawnTick++
+            }
+            sessionListVersion++
+            notify("$reason: $stopped nodo(s) detenidos (IA preservada)", showSnackbar = true)
+        } else {
+            notify("$reason: sin nodos ROS 2 activos")
+        }
+        return stopped
+    }
+
+    fun selectSpace(target: WorkstationSpace) {
+        if (activeSpace == target) return
+        val sessions = latestTermuxService?.termuxSessions.orEmpty()
+        if (activeSpace == WorkstationSpace.DEV_AI) {
+            lastDevSessionIndex = activeSessionIndex
+        } else {
+            lastRos2SessionIndex = activeSessionIndex
+        }
+        activeSpace = target
+        if (target == WorkstationSpace.ROS2_CONTROL) {
+            ros2InspectorShowSsh = false
+            if (primaryTab == PrimaryTab.AGENTS || primaryTab == PrimaryTab.STORAGE) {
+                primaryTab = PrimaryTab.ROS_CONTROL
+            }
+            val rosIndices = sessions.indices.filter {
+                RurControlCenterManager.isRos2SessionTitle(sessions[it].terminalSession.mSessionName)
+            }
+            if (rosIndices.isNotEmpty()) {
+                val restored = if (lastRos2SessionIndex in rosIndices) lastRos2SessionIndex else rosIndices.first()
+                activeSessionIndex = restored
+                lastRos2SessionIndex = restored
+            } else if (latestRurState.ros2Ready) {
+                spawnRos2ShellSession()
+            } else {
+                // Guide user cleanly to Login + 1-tap Ubuntu ROS 2 installer
+                when (formFactor) {
+                    WorkstationFormFactor.PHONE_PORTRAIT,
+                    WorkstationFormFactor.PHONE_LANDSCAPE -> primaryTab = PrimaryTab.ROS_CONTROL
+                    WorkstationFormFactor.TABLET_PORTRAIT -> isPortraitSheetOpen = true
+                    WorkstationFormFactor.TABLET_LANDSCAPE -> isZenMode = false
+                }
+            }
+            scope.launch { rurState = rurControlManager.inspectState() }
+        } else {
+            if (primaryTab == PrimaryTab.ROS_CONTROL) {
+                primaryTab = PrimaryTab.AGENTS
+            }
+            val devIndices = sessions.indices.filter {
+                !RurControlCenterManager.isRos2SessionTitle(sessions[it].terminalSession.mSessionName)
+            }
+            if (devIndices.isNotEmpty()) {
+                val restored = if (lastDevSessionIndex in devIndices) lastDevSessionIndex else devIndices.first()
+                activeSessionIndex = restored
+                lastDevSessionIndex = restored
+            }
+        }
+    }
+
+    fun addSessionForActiveSpace() {
+        if (latestActiveSpace == WorkstationSpace.ROS2_CONTROL) {
+            spawnRos2ShellSession()
+        } else {
+            spawnNewPtySession()
+        }
+    }
+
     fun closePtySession(index: Int) {
-        val service = termuxService ?: return
+        val service = latestTermuxService ?: return
         val list = service.termuxSessions
         if (index !in list.indices) return
         val target = list[index].terminalSession
@@ -539,35 +966,52 @@ private fun WorkstationRoot(
             target.finishIfRunning()
             service.removeTermuxSession(target)
         }
-        val remaining = service.termuxSessions.size
-        activeSessionIndex = when {
-            remaining == 0 -> 0
-            index < activeSessionIndex -> (activeSessionIndex - 1).coerceAtLeast(0)
-            else -> activeSessionIndex.coerceIn(0, remaining - 1)
+        val remaining = service.termuxSessions
+        val wantRos = latestActiveSpace == WorkstationSpace.ROS2_CONTROL
+        val sameSpaceIndices = remaining.indices.filter {
+            RurControlCenterManager.isRos2SessionTitle(remaining[it].terminalSession.mSessionName) == wantRos
         }
-        if (remaining == 0) {
+        activeSessionIndex = when {
+            remaining.isEmpty() -> 0
+            sameSpaceIndices.isNotEmpty() -> {
+                sameSpaceIndices.firstOrNull { it >= index } ?: sameSpaceIndices.last()
+            }
+            index < activeSessionIndex -> (activeSessionIndex - 1).coerceAtLeast(0)
+            else -> activeSessionIndex.coerceIn(0, remaining.lastIndex)
+        }
+        if (remaining.isEmpty()) {
             sessionRespawnTick++
         }
         sessionListVersion++
         notify("Closed $label", showSnackbar = true)
     }
 
+    val latestAddSessionAction by rememberUpdatedState(::addSessionForActiveSpace)
     val surfaceBridge = remember {
         TermuxViewSurfaceBridge(
             context = context,
             onShortcutCommandPalette = { isCommandPaletteOpen = true },
-            onShortcutNewSession = { spawnNewPtySession() },
+            onShortcutNewSession = { latestAddSessionAction() },
             onShortcutCycleSession = {
-                val count = termuxService?.termuxSessions?.size ?: 0
-                if (count > 1) {
-                    activeSessionIndex = (activeSessionIndex + 1) % count
+                val sessions = latestTermuxService?.termuxSessions.orEmpty()
+                val wantRos = latestActiveSpace == WorkstationSpace.ROS2_CONTROL
+                val spaceIndices = sessions.indices.filter {
+                    RurControlCenterManager.isRos2SessionTitle(sessions[it].terminalSession.mSessionName) == wantRos
+                }
+                if (spaceIndices.size > 1) {
+                    val pos = spaceIndices.indexOf(activeSessionIndex).coerceAtLeast(0)
+                    activeSessionIndex = spaceIndices[(pos + 1) % spaceIndices.size]
                     sessionListVersion++
                 }
             },
-            onShortcutSelectSession = { targetIdx ->
-                val count = termuxService?.termuxSessions?.size ?: 0
-                if (targetIdx in 0 until count) {
-                    activeSessionIndex = targetIdx
+            onShortcutSelectSession = { targetPos ->
+                val sessions = latestTermuxService?.termuxSessions.orEmpty()
+                val wantRos = latestActiveSpace == WorkstationSpace.ROS2_CONTROL
+                val spaceIndices = sessions.indices.filter {
+                    RurControlCenterManager.isRos2SessionTitle(sessions[it].terminalSession.mSessionName) == wantRos
+                }
+                if (targetPos in spaceIndices.indices) {
+                    activeSessionIndex = spaceIndices[targetPos]
                     sessionListVersion++
                 }
             },
@@ -597,6 +1041,15 @@ private fun WorkstationRoot(
     // Route `melcat.open_panel` extra from `workstation ui`
     LaunchedEffect(pendingPanelRoute) {
         when (pendingPanelRoute) {
+            "ros2", "rur" -> {
+                selectSpace(WorkstationSpace.ROS2_CONTROL)
+                when (formFactor) {
+                    WorkstationFormFactor.PHONE_PORTRAIT,
+                    WorkstationFormFactor.PHONE_LANDSCAPE -> primaryTab = PrimaryTab.ROS_CONTROL
+                    WorkstationFormFactor.TABLET_PORTRAIT -> isPortraitSheetOpen = true
+                    WorkstationFormFactor.TABLET_LANDSCAPE -> isZenMode = false
+                }
+            }
             "agents" -> navigateToInspectorTab(InspectorTab.AGENTS)
             "ssh" -> navigateToInspectorTab(InspectorTab.SSH)
             "shield" -> navigateToInspectorTab(InspectorTab.SHIELD)
@@ -642,7 +1095,10 @@ private fun WorkstationRoot(
                         !isOtaTokenDialogOpen &&
                         !isTutorialOpen &&
                         !isSshEditorOpen &&
-                        pendingDeleteSshDeviceId == null
+                        pendingDeleteSshDeviceId == null &&
+                        !isRurConfigDialogOpen &&
+                        !isRur2faDialogOpen &&
+                        !isAddRurRobotDialogOpen
                     ) {
                         surfaceBridge.terminalView.post {
                             if (surfaceBridge.terminalView.hasWindowFocus()) {
@@ -661,6 +1117,7 @@ private fun WorkstationRoot(
                         val wasScanning = sshPanelState.isScanning
                         sshPanelState = sshDevicesManager.inspectEnvironmentAndDevices(sshPanelState.probes)
                             .copy(isScanning = wasScanning)
+                        rurState = rurControlManager.inspectState()
                         storageMetrics = storageOptimizer.inspectMetrics(storageMetrics.lastGcSummary)
                         releaseUpdater.refreshTokenState()
                         if (latestSshPanelVisible && !wasScanning) {
@@ -704,10 +1161,21 @@ private fun WorkstationRoot(
         tokenState = tokenWarden.inspectTokenState()
         codingAgentsState = codingAgentsManager.inspectState()
         sshPanelState = sshDevicesManager.inspectEnvironmentAndDevices(sshPanelState.probes)
+        rurState = rurControlManager.inspectState()
         storageMetrics = storageOptimizer.inspectMetrics()
         releaseUpdater.refreshTokenState()
         ProcessGuardianService.refreshSnapshot(context)
         releaseUpdater.checkForUpdate(silentOnNetworkError = true)
+    }
+
+    // Periodic 20s PAGE_RUR fleet & drift sync ONLY while inside ROS 2 space (zero battery drain in Dev & IA)
+    LaunchedEffect(activeSpace, rurState.isAuthenticated, rurState.hasDeviceKey) {
+        if (activeSpace == WorkstationSpace.ROS2_CONTROL && (rurState.isAuthenticated || rurState.hasDeviceKey)) {
+            while (isActive) {
+                rurState = rurControlManager.syncFleetFromPageRur(forceTokens = false)
+                delay(20_000L)
+            }
+        }
     }
 
     // Load SKILL.md safely with monotonic generation guard so rapid switch/dismiss can never clobber state
@@ -810,6 +1278,13 @@ private fun WorkstationRoot(
             LivePtyTab(index = idx, title = rawName, isRunning = ts.terminalSession.isRunning)
         }
     }
+    val devSessions = remember(liveSessions) {
+        liveSessions.filter { !RurControlCenterManager.isRos2SessionTitle(it.title) }
+    }
+    val ros2Sessions = remember(liveSessions) {
+        liveSessions.filter { RurControlCenterManager.isRos2SessionTitle(it.title) }
+    }
+    val visibleSessions = if (activeSpace == WorkstationSpace.ROS2_CONTROL) ros2Sessions else devSessions
 
     val refreshHzInt = surfaceBridge.activeRefreshRateHz.toInt().coerceAtLeast(60)
     val shieldScore = computeShieldScore(
@@ -887,6 +1362,11 @@ private fun WorkstationRoot(
             notify(err.message ?: "Dispositivo SSH inválido", showSnackbar = true)
             return
         }
+        val tabTitle = if (latestActiveSpace == WorkstationSpace.ROS2_CONTROL) {
+            "ros-ssh:${device.safeTabTitle.removePrefix("ssh:")}"
+        } else {
+            device.safeTabTitle
+        }
         val created = runCatching {
             service.createTermuxSession(
                 execPair.first,
@@ -894,12 +1374,18 @@ private fun WorkstationRoot(
                 null,
                 TermuxConstants.TERMUX_HOME_DIR_PATH,
                 false,
-                device.safeTabTitle,
+                tabTitle,
             )
         }.getOrNull()
         if (created != null) {
             cancelSshScan()
-            activeSessionIndex = (service.termuxSessions.size - 1).coerceAtLeast(0)
+            val newIdx = (service.termuxSessions.size - 1).coerceAtLeast(0)
+            activeSessionIndex = newIdx
+            if (latestActiveSpace == WorkstationSpace.ROS2_CONTROL) {
+                lastRos2SessionIndex = newIdx
+            } else {
+                lastDevSessionIndex = newIdx
+            }
             sessionListVersion++
             primaryTab = PrimaryTab.TERMINAL
             isPortraitSheetOpen = false
@@ -916,8 +1402,6 @@ private fun WorkstationRoot(
             notify("No se pudo abrir la sesión SSH", showSnackbar = true)
         }
     }
-
-    val latestTermuxService by rememberUpdatedState(termuxService)
 
     fun spawnSshCopyIdPtySession(device: SshDeviceRecord) {
         if (!bootstrapReady && !CustomBootstrapProvisioner.isBootstrapInstalled()) {
@@ -1324,11 +1808,180 @@ private fun WorkstationRoot(
         }
     }
 
+    val renderRurPanel: @Composable () -> Unit = {
+        RurControlCenterPanel(
+            state = rurState,
+            liveRos2Sessions = ros2Sessions,
+            sshDevices = sshPanelState.devices,
+            isAuthBusy = isRurAuthBusy,
+            authError = rurAuthError,
+            isSyncBusy = isRurSyncBusy,
+            onLoginOperator = { mat, cred, onSuccessClear ->
+                if (!isRurAuthBusy) {
+                    isRurAuthBusy = true
+                    rurAuthError = null
+                    scope.launch {
+                        try {
+                            rurControlManager.loginOperator(mat, cred)
+                                .onSuccess { updated ->
+                                    rurState = updated
+                                    rurAuthError = null
+                                    onSuccessClear()
+                                    val op = updated.operatorSession
+                                    notify(
+                                        "Sesión RUR activa: ${op?.displayName ?: mat} (${op?.primaryRoleLabel ?: "OK"})",
+                                        showSnackbar = true,
+                                    )
+                                }
+                                .onFailure { err ->
+                                    rurAuthError = err.message ?: "Error al iniciar sesión en PAGE_RUR"
+                                }
+                        } finally {
+                            isRurAuthBusy = false
+                        }
+                    }
+                }
+            },
+            onClearAuthError = { rurAuthError = null },
+            onLogoutOperator = {
+                if (!isRurAuthBusy) {
+                    isRurAuthBusy = true
+                    scope.launch {
+                        try {
+                            teardownRurNodeSessions("Cierre de sesión RUR")
+                            rurState = rurControlManager.logoutOperator()
+                            rurAuthError = null
+                            notify("Sesión de operador cerrada (0600 purgada)", showSnackbar = true)
+                        } finally {
+                            isRurAuthBusy = false
+                        }
+                    }
+                }
+            },
+            onSetOfflineBypass = { enabled ->
+                scope.launch {
+                    rurState = rurControlManager.setOfflineBypass(enabled)
+                    rurAuthError = null
+                }
+            },
+            onOpen2faSetup = {
+                rur2faError = null
+                rur2faPayload = null
+                isRur2faDialogOpen = true
+                isRur2faBusy = true
+                scope.launch {
+                    try {
+                        rurControlManager.generateOperator2fa()
+                            .onSuccess { payload -> rur2faPayload = payload }
+                            .onFailure { err -> rur2faError = err.message ?: "Error generando 2FA" }
+                    } finally {
+                        isRur2faBusy = false
+                    }
+                }
+            },
+            onSyncFleet = {
+                if (!isRurSyncBusy) {
+                    isRurSyncBusy = true
+                    scope.launch {
+                        try {
+                            rurState = rurControlManager.syncFleetFromPageRur(forceTokens = true)
+                            val st = rurState.syncStatus
+                            notify(
+                                if (st.ok) "Flota sincronizada (${rurState.robots.size} robots)" else (st.error ?: st.code),
+                                showSnackbar = true,
+                            )
+                        } finally {
+                            isRurSyncBusy = false
+                        }
+                    }
+                }
+            },
+            onApplyDriftUpdate = {
+                if (!isRurSyncBusy) {
+                    isRurSyncBusy = true
+                    scope.launch {
+                        try {
+                            teardownRurNodeSessions("Actualización PAGE_RUR")
+                            rurState = rurControlManager.syncFleetFromPageRur(forceTokens = true)
+                            notify("Configuración actualizada aplicada", showSnackbar = true)
+                        } finally {
+                            isRurSyncBusy = false
+                        }
+                    }
+                }
+            },
+            onSelectRobot = { robotId ->
+                if (!isRurSyncBusy) {
+                    isRurSyncBusy = true
+                    scope.launch {
+                        try {
+                            teardownRurNodeSessions("Cambio de robot")
+                            rurState = rurControlManager.selectActiveRobot(robotId)
+                            notify("Robot activo: ${rurState.activeRobot.name} (D${rurState.effectiveRosDomainId})", showSnackbar = true)
+                        } finally {
+                            isRurSyncBusy = false
+                        }
+                    }
+                }
+            },
+            onOpenAddRobotDialog = {
+                addRurRobotError = null
+                isAddRurRobotDialogOpen = true
+            },
+            onOpenConfigDialog = {
+                rurConfigError = null
+                isRurConfigDialogOpen = true
+            },
+            onInstallRos2 = { spawnInstallRos2Session() },
+            onOpenFoxgloveBrowser = {
+                val url = "https://app.foxglove.dev/?ds=foxglove-websocket&ds.url=ws%3A%2F%2F127.0.0.1%3A8765"
+                runCatching {
+                    context.startActivity(
+                        Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                    )
+                }.onFailure {
+                    notify("Abre Foxglove Studio en ws://127.0.0.1:8765", showSnackbar = true)
+                }
+            },
+            onLaunchAiInRos2 = { bin -> spawnRos2AiAgentSession(bin) },
+            onOpenCodingModelsDialog = {
+                codingModelsDialogError = null
+                scope.launch { codingAgentsState = codingAgentsManager.inspectState() }
+                isCodingModelsDialogOpen = true
+            },
+            onLaunchModule = { mod -> spawnRos2ModuleSession(mod) },
+            onLaunchStack = { stack -> spawnRos2Stack(stack) },
+            onFocusSession = { idx ->
+                activeSessionIndex = idx
+                lastRos2SessionIndex = idx
+                primaryTab = PrimaryTab.TERMINAL
+                isPortraitSheetOpen = false
+            },
+            onCloseSession = { idx -> closePtySession(idx) },
+            onTeardownRosNodes = { teardownRurNodeSessions("Teardown ROS") },
+            onOpenLinkedPiSsh = { dev -> spawnSshPtySession(dev) },
+        )
+    }
+
     val bannerTopPadding = when (formFactor) {
         WorkstationFormFactor.PHONE_PORTRAIT,
         WorkstationFormFactor.TABLET_PORTRAIT -> 92.dp
         WorkstationFormFactor.TABLET_LANDSCAPE -> 54.dp
         WorkstationFormFactor.PHONE_LANDSCAPE -> 44.dp
+    }
+
+    val onQuickCommandForActiveSpace: (String) -> Unit = { cmd ->
+        if (activeSpace == WorkstationSpace.ROS2_CONTROL && ros2Sessions.isEmpty()) {
+            when (cmd) {
+                "agy" -> spawnRos2AiAgentSession("agy")
+                "opencode" -> spawnRos2AiAgentSession("opencode")
+                else -> spawnRos2ShellSession()
+            }
+        } else {
+            dispatchCommandToPty(cmd)
+        }
     }
 
     // Root container — Obsidian canvas + dismissable OTA banner + SnackbarHost
@@ -1340,8 +1993,9 @@ private fun WorkstationRoot(
             when (formFactor) {
                 WorkstationFormFactor.PHONE_PORTRAIT -> {
                     PhonePortraitLayout(
+                        activeSpace = activeSpace,
                         refreshHz = refreshHzInt,
-                        liveSessions = liveSessions,
+                        liveSessions = visibleSessions,
                         activeSessionIndex = activeSessionIndex,
                         primaryTab = primaryTab,
                         isImeVisible = isImeVisible,
@@ -1351,45 +2005,52 @@ private fun WorkstationRoot(
                         tokenPresent = tokenState.isPresent,
                         freeStorage = storageMetrics.freeFormatted,
                         statusNotice = statusNotice,
+                        onSelectSpace = { selectSpace(it) },
                         onSelectSession = { activeSessionIndex = it },
-                        onAddSession = { spawnNewPtySession() },
+                        onAddSession = { addSessionForActiveSpace() },
                         onCloseSession = { closePtySession(it) },
                         onOpenTutorial = { isTutorialOpen = true },
                         onSelectTab = { selectPrimaryTab(it) },
                         onOpenCommandPalette = { isCommandPaletteOpen = true },
                         onOpenClassicTermux = openClassicTermux,
-                        onQuickCommand = dispatchCommandToPty,
+                        onQuickCommand = onQuickCommandForActiveSpace,
                         renderInspector = renderInspectorContent,
+                        renderRurPanel = renderRurPanel,
                     )
                 }
 
                 WorkstationFormFactor.PHONE_LANDSCAPE -> {
                     PhoneLandscapeLayout(
+                        activeSpace = activeSpace,
                         refreshHz = refreshHzInt,
-                        liveSessions = liveSessions,
+                        liveSessions = visibleSessions,
                         activeSessionIndex = activeSessionIndex,
                         primaryTab = primaryTab,
                         hasHardwareKeyboard = hasHardwareKeyboard,
                         surfaceBridge = surfaceBridge,
+                        onSelectSpace = { selectSpace(it) },
                         onSelectSession = { activeSessionIndex = it },
-                        onAddSession = { spawnNewPtySession() },
+                        onAddSession = { addSessionForActiveSpace() },
                         onCloseSession = { closePtySession(it) },
                         onOpenTutorial = { isTutorialOpen = true },
                         onSelectTab = { selectPrimaryTab(it) },
                         onOpenCommandPalette = { isCommandPaletteOpen = true },
                         onOpenClassicTermux = openClassicTermux,
-                        onQuickCommand = dispatchCommandToPty,
+                        onQuickCommand = onQuickCommandForActiveSpace,
                         renderInspector = renderInspectorContent,
+                        renderRurPanel = renderRurPanel,
                     )
                 }
 
                 WorkstationFormFactor.TABLET_PORTRAIT -> {
                     TabletPortraitLayout(
+                        activeSpace = activeSpace,
                         refreshHz = refreshHzInt,
                         hasHardwareKeyboard = hasHardwareKeyboard,
-                        liveSessions = liveSessions,
+                        liveSessions = visibleSessions,
                         activeSessionIndex = activeSessionIndex,
                         inspectorTab = inspectorTab,
+                        ros2InspectorShowSsh = ros2InspectorShowSsh,
                         isSheetOpen = isPortraitSheetOpen,
                         surfaceBridge = surfaceBridge,
                         crdtSiteId = crdtDatabase.siteId,
@@ -1397,26 +2058,31 @@ private fun WorkstationRoot(
                         guardianStatus = guardianStatus,
                         storageMetrics = storageMetrics,
                         statusNotice = statusNotice,
+                        onSelectSpace = { selectSpace(it) },
                         onSelectSession = { activeSessionIndex = it },
-                        onAddSession = { spawnNewPtySession() },
+                        onAddSession = { addSessionForActiveSpace() },
                         onCloseSession = { closePtySession(it) },
                         onOpenTutorial = { isTutorialOpen = true },
                         onToggleSheet = { isPortraitSheetOpen = !isPortraitSheetOpen },
                         onSelectInspectorTab = { inspectorTab = it },
+                        onSelectRos2InspectorShowSsh = { ros2InspectorShowSsh = it },
                         onOpenCommandPalette = { isCommandPaletteOpen = true },
                         onOpenClassicTermux = openClassicTermux,
-                        onQuickCommand = dispatchCommandToPty,
+                        onQuickCommand = onQuickCommandForActiveSpace,
                         renderInspector = renderInspectorContent,
+                        renderRurPanel = renderRurPanel,
                     )
                 }
 
                 WorkstationFormFactor.TABLET_LANDSCAPE -> {
                     TabletLandscapeLayout(
+                        activeSpace = activeSpace,
                         refreshHz = refreshHzInt,
                         hasHardwareKeyboard = hasHardwareKeyboard,
-                        liveSessions = liveSessions,
+                        liveSessions = visibleSessions,
                         activeSessionIndex = activeSessionIndex,
                         inspectorTab = inspectorTab,
+                        ros2InspectorShowSsh = ros2InspectorShowSsh,
                         isZenMode = isZenMode,
                         surfaceBridge = surfaceBridge,
                         crdtSiteId = crdtDatabase.siteId,
@@ -1424,12 +2090,17 @@ private fun WorkstationRoot(
                         guardianStatus = guardianStatus,
                         storageMetrics = storageMetrics,
                         statusNotice = statusNotice,
+                        onSelectSpace = { selectSpace(it) },
                         onSelectSession = { activeSessionIndex = it },
-                        onAddSession = { spawnNewPtySession() },
+                        onAddSession = { addSessionForActiveSpace() },
                         onCloseSession = { closePtySession(it) },
                         onOpenTutorial = { isTutorialOpen = true },
                         onSelectInspectorTab = {
                             inspectorTab = it
+                            isZenMode = false
+                        },
+                        onSelectRos2InspectorShowSsh = {
+                            ros2InspectorShowSsh = it
                             isZenMode = false
                         },
                         onToggleZenMode = {
@@ -1439,8 +2110,9 @@ private fun WorkstationRoot(
                         },
                         onOpenCommandPalette = { isCommandPaletteOpen = true },
                         onOpenClassicTermux = openClassicTermux,
-                        onQuickCommand = dispatchCommandToPty,
+                        onQuickCommand = onQuickCommandForActiveSpace,
                         renderInspector = renderInspectorContent,
+                        renderRurPanel = renderRurPanel,
                     )
                 }
             }
@@ -1538,6 +2210,7 @@ private fun WorkstationRoot(
             onExecuteShellCommand = { cmd ->
                 when (cmd) {
                     "workstation install-ssh" -> spawnInstallOpenSshSession()
+                    "workstation install-ros2" -> spawnInstallRos2Session()
                     "workstation skills update" -> spawnSkillsPtySession("update")
                     "workstation skills diff" -> spawnSkillsPtySession("diff")
                     "workstation skills push" -> spawnSkillsPtySession("push")
@@ -1546,7 +2219,7 @@ private fun WorkstationRoot(
                 isCommandPaletteOpen = false
             },
             onNewPtySession = {
-                spawnNewPtySession()
+                addSessionForActiveSpace()
                 isCommandPaletteOpen = false
             },
             onToggleZen = {
@@ -1567,6 +2240,18 @@ private fun WorkstationRoot(
             onOpenSshPanel = {
                 isCommandPaletteOpen = false
                 navigateToInspectorTab(InspectorTab.SSH)
+            },
+            onOpenRos2Space = {
+                isCommandPaletteOpen = false
+                selectSpace(WorkstationSpace.ROS2_CONTROL)
+            },
+            onLaunchRos2Ai = { bin ->
+                isCommandPaletteOpen = false
+                spawnRos2AiAgentSession(bin)
+            },
+            onTeardownRos2Nodes = {
+                isCommandPaletteOpen = false
+                teardownRurNodeSessions("Teardown ROS")
             },
             onCheckAppUpdate = {
                 isCommandPaletteOpen = false
@@ -1858,6 +2543,139 @@ private fun WorkstationRoot(
                 if (!isSkillEditorSaving) {
                     editingSkillName = null
                     skillEditorError = null
+                }
+            },
+        )
+    }
+
+    if (isRurConfigDialogOpen) {
+        RurConfigDialog(
+            state = rurState,
+            sshDevices = sshPanelState.devices,
+            isSaving = isRurConfigSaving,
+            errorText = rurConfigError,
+            onDismiss = {
+                if (!isRurConfigSaving) {
+                    isRurConfigDialogOpen = false
+                    rurConfigError = null
+                }
+            },
+            onSave = { webUrl, devKey, domainId, repoPath, scriptsPath, linkedPiId, customScripts ->
+                if (isRurConfigSaving) return@RurConfigDialog
+                isRurConfigSaving = true
+                rurConfigError = null
+                scope.launch {
+                    try {
+                        rurControlManager.saveSettings(
+                            webApiUrl = webUrl,
+                            deviceKeyInput = devKey,
+                            defaultRosDomainId = domainId,
+                            offboardRepoPath = repoPath,
+                            scriptsPath = scriptsPath,
+                            linkedPiSshDeviceId = linkedPiId,
+                            customScripts = customScripts,
+                        ).onSuccess { updated ->
+                            rurState = updated
+                            isRurConfigDialogOpen = false
+                            rurConfigError = null
+                            notify("Configuración ROS 2 guardada", showSnackbar = true)
+                            if (updated.isAuthenticated || updated.hasDeviceKey) {
+                                rurState = rurControlManager.syncFleetFromPageRur(forceTokens = true)
+                            }
+                        }.onFailure { err ->
+                            rurConfigError = err.message ?: "Error guardando configuración ROS 2"
+                        }
+                    } finally {
+                        isRurConfigSaving = false
+                    }
+                }
+            },
+        )
+    }
+
+    if (isRur2faDialogOpen) {
+        Rur2faSetupDialog(
+            payload = rur2faPayload,
+            isBusy = isRur2faBusy,
+            errorText = rur2faError,
+            onCopySecret = { secret ->
+                clipboard.setText(AnnotatedString(secret))
+                notify("Clave 2FA copiada al portapapeles", showSnackbar = true)
+            },
+            onOpenAuthenticatorUri = { uri ->
+                runCatching {
+                    context.startActivity(
+                        Intent(Intent.ACTION_VIEW, Uri.parse(uri)).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                    )
+                }.onFailure {
+                    notify("Copia la clave manualmente en Google Authenticator", showSnackbar = true)
+                }
+            },
+            onVerifyCode = { code, secret ->
+                if (!isRur2faBusy) {
+                    isRur2faBusy = true
+                    rur2faError = null
+                    scope.launch {
+                        try {
+                            rurControlManager.enableOperator2fa(code, secret)
+                                .onSuccess { updated ->
+                                    rurState = updated
+                                    isRur2faDialogOpen = false
+                                    rur2faPayload = null
+                                    rur2faError = null
+                                    notify("2FA Google Authenticator activado en PAGE_RUR", showSnackbar = true)
+                                }
+                                .onFailure { err ->
+                                    rur2faError = err.message ?: "Código 2FA inválido"
+                                }
+                        } finally {
+                            isRur2faBusy = false
+                        }
+                    }
+                }
+            },
+            onDismiss = {
+                if (!isRur2faBusy) {
+                    isRur2faDialogOpen = false
+                    rur2faPayload = null
+                    rur2faError = null
+                }
+            },
+        )
+    }
+
+    if (isAddRurRobotDialogOpen) {
+        AddLocalRurRobotDialog(
+            defaultDomainId = rurState.defaultRosDomainId,
+            isSaving = isAddRurRobotSaving,
+            errorText = addRurRobotError,
+            onDismiss = {
+                if (!isAddRurRobotSaving) {
+                    isAddRurRobotDialogOpen = false
+                    addRurRobotError = null
+                }
+            },
+            onSave = { name, room, domainId, lkUrl ->
+                if (isAddRurRobotSaving) return@AddLocalRurRobotDialog
+                isAddRurRobotSaving = true
+                addRurRobotError = null
+                scope.launch {
+                    try {
+                        rurControlManager.upsertLocalRobot(name, room, domainId, lkUrl)
+                            .onSuccess { updated ->
+                                rurState = updated
+                                isAddRurRobotDialogOpen = false
+                                addRurRobotError = null
+                                notify("Robot agregado: $name (D$domainId)", showSnackbar = true)
+                            }
+                            .onFailure { err ->
+                                addRurRobotError = err.message ?: "Error al agregar robot"
+                            }
+                    } finally {
+                        isAddRurRobotSaving = false
+                    }
                 }
             },
         )

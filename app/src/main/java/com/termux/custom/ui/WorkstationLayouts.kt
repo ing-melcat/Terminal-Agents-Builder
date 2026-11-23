@@ -66,6 +66,7 @@ private val TabletInspectorExpandedWidth = 360.dp
 // ============================================================================================
 @Composable
 internal fun PhonePortraitLayout(
+    activeSpace: WorkstationSpace,
     refreshHz: Int,
     liveSessions: List<LivePtyTab>,
     activeSessionIndex: Int,
@@ -77,6 +78,7 @@ internal fun PhonePortraitLayout(
     tokenPresent: Boolean,
     freeStorage: String,
     statusNotice: String,
+    onSelectSpace: (WorkstationSpace) -> Unit,
     onSelectSession: (Int) -> Unit,
     onAddSession: () -> Unit,
     onCloseSession: (Int) -> Unit,
@@ -86,11 +88,18 @@ internal fun PhonePortraitLayout(
     onOpenClassicTermux: () -> Unit,
     onQuickCommand: (String) -> Unit,
     renderInspector: @Composable (InspectorTab) -> Unit,
+    renderRurPanel: @Composable () -> Unit,
 ) {
     val haptics = LocalHapticFeedback.current
+    val isRosSpace = activeSpace == WorkstationSpace.ROS2_CONTROL
     val horizontalInsets = WindowInsets.navigationBars
         .union(WindowInsets.displayCutout)
         .only(WindowInsetsSides.Horizontal)
+    val visibleTabs = if (isRosSpace) {
+        listOf(PrimaryTab.TERMINAL, PrimaryTab.ROS_CONTROL, PrimaryTab.SSH, PrimaryTab.SHIELD)
+    } else {
+        listOf(PrimaryTab.TERMINAL, PrimaryTab.AGENTS, PrimaryTab.SSH, PrimaryTab.SHIELD, PrimaryTab.STORAGE)
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         // Strict single-row 50dp header + statusBarsPadding inside full-bleed Surface
@@ -111,21 +120,17 @@ internal fun PhonePortraitLayout(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(50.dp)
-                        .padding(horizontal = 12.dp),
+                        .padding(horizontal = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    RurBrandBadge(size = 26.dp)
-                    Text(
-                        text = "RUR Agents",
-                        color = WorkstationColors.TextPrimary,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
+                    RurBrandBadge(size = 24.dp)
+                    WorkspaceSpaceSwitcher(
+                        activeSpace = activeSpace,
+                        compact = true,
+                        onSelectSpace = onSelectSpace,
                     )
+                    Spacer(modifier = Modifier.weight(1f))
                     CompactStatusPill(
                         label = "${refreshHz}Hz",
                         healthy = liveSessions.isNotEmpty(),
@@ -133,15 +138,17 @@ internal fun PhonePortraitLayout(
                     CompactIconAction(
                         icon = WorkstationIcons.CommandSpark,
                         contentDescription = "Command Palette",
+                        size = 32.dp,
                         onClick = {
                             haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                             onOpenCommandPalette()
                         },
                     )
-                    CompactHelpKeycap(onClick = onOpenTutorial)
+                    CompactHelpKeycap(size = 32.dp, onClick = onOpenTutorial)
                     CompactIconAction(
                         icon = WorkstationIcons.ClassicShell,
                         contentDescription = "Classic Shell",
+                        size = 32.dp,
                         onClick = {
                             haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                             onOpenClassicTermux()
@@ -173,6 +180,7 @@ internal fun PhonePortraitLayout(
                     onSelect = onSelectSession,
                     onAdd = onAddSession,
                     onCloseSession = onCloseSession,
+                    emptyLabel = if (isRosSpace) "Toca + para Ubuntu ROS 2" else "Initializing runtime…",
                 )
                 TerminalCanvasHost(
                     surfaceBridge = surfaceBridge,
@@ -188,11 +196,12 @@ internal fun PhonePortraitLayout(
                         slim = false,
                         onQuickCommand = onQuickCommand,
                         contentInsets = horizontalInsets,
+                        ros2Mode = isRosSpace,
                     )
                 }
             }
 
-            // Opaque full-bleed panel overlay for Agents / Shield / Storage tabs
+            // Opaque full-bleed panel overlay for Agents / ROS Control / SSH / Shield / Storage tabs
             if (primaryTab != PrimaryTab.TERMINAL) {
                 Surface(
                     color = WorkstationColors.VoidCanvas,
@@ -204,7 +213,11 @@ internal fun PhonePortraitLayout(
                             .windowInsetsPadding(horizontalInsets)
                             .padding(horizontal = 12.dp, vertical = 8.dp),
                     ) {
-                        renderInspector(primaryTab.toInspectorTab())
+                        if (primaryTab == PrimaryTab.ROS_CONTROL) {
+                            renderRurPanel()
+                        } else {
+                            renderInspector(primaryTab.toInspectorTab())
+                        }
                     }
                 }
             }
@@ -218,7 +231,11 @@ internal fun PhonePortraitLayout(
         ) {
             Column(modifier = Modifier.fillMaxWidth()) {
                 CompactTelemetryBar(
-                    leftText = "PTY:${liveSessions.size} · Shield:${shieldScore}% · ${if (tokenPresent) "Vault:ON" else "Vault:OFF"} · $freeStorage",
+                    leftText = if (isRosSpace) {
+                        "ROS2:${liveSessions.size} · Shield:${shieldScore}% · $freeStorage"
+                    } else {
+                        "PTY:${liveSessions.size} · Shield:${shieldScore}% · ${if (tokenPresent) "Vault:ON" else "Vault:OFF"} · $freeStorage"
+                    },
                     rightNotice = statusNotice,
                     compactPhone = true,
                     applyBottomInsets = false,
@@ -240,11 +257,13 @@ internal fun PhonePortraitLayout(
                             .padding(horizontal = 4.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        PrimaryTab.entries.forEach { tab ->
+                        visibleTabs.forEach { tab ->
                             val selected = primaryTab == tab
+                            val accentWash = if (tab == PrimaryTab.ROS_CONTROL) WorkstationColors.AccentEmeraldWash else WorkstationColors.AccentCyanWash
+                            val accentFg = if (tab == PrimaryTab.ROS_CONTROL) WorkstationColors.AccentEmerald else WorkstationColors.AccentCyan
                             Surface(
                                 shape = RoundedCornerShape(10.dp),
-                                color = if (selected) WorkstationColors.AccentCyanWash else androidx.compose.ui.graphics.Color.Transparent,
+                                color = if (selected) accentWash else androidx.compose.ui.graphics.Color.Transparent,
                                 modifier = Modifier
                                     .weight(1f)
                                     .fillMaxHeight()
@@ -263,7 +282,7 @@ internal fun PhonePortraitLayout(
                                     Icon(
                                         imageVector = tabIcon(tab),
                                         contentDescription = tab.label,
-                                        tint = if (selected) WorkstationColors.AccentCyan else WorkstationColors.TextSecondary,
+                                        tint = if (selected) accentFg else WorkstationColors.TextSecondary,
                                         modifier = Modifier.size(19.dp),
                                     )
                                     Spacer(modifier = Modifier.height(2.dp))
@@ -271,7 +290,7 @@ internal fun PhonePortraitLayout(
                                         text = tab.label,
                                         fontSize = 10.sp,
                                         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                                        color = if (selected) WorkstationColors.AccentCyan else WorkstationColors.TextSecondary,
+                                        color = if (selected) accentFg else WorkstationColors.TextSecondary,
                                         maxLines = 1,
                                         softWrap = false,
                                         overflow = TextOverflow.Ellipsis,
@@ -291,12 +310,14 @@ internal fun PhonePortraitLayout(
 // ============================================================================================
 @Composable
 internal fun PhoneLandscapeLayout(
+    activeSpace: WorkstationSpace,
     refreshHz: Int,
     liveSessions: List<LivePtyTab>,
     activeSessionIndex: Int,
     primaryTab: PrimaryTab,
     hasHardwareKeyboard: Boolean,
     surfaceBridge: TermuxViewSurfaceBridge,
+    onSelectSpace: (WorkstationSpace) -> Unit,
     onSelectSession: (Int) -> Unit,
     onAddSession: () -> Unit,
     onCloseSession: (Int) -> Unit,
@@ -306,17 +327,24 @@ internal fun PhoneLandscapeLayout(
     onOpenClassicTermux: () -> Unit,
     onQuickCommand: (String) -> Unit,
     renderInspector: @Composable (InspectorTab) -> Unit,
+    renderRurPanel: @Composable () -> Unit,
 ) {
     val haptics = LocalHapticFeedback.current
+    val isRosSpace = activeSpace == WorkstationSpace.ROS2_CONTROL
     val endInsets = WindowInsets.navigationBars
         .union(WindowInsets.displayCutout)
         .only(WindowInsetsSides.End)
     val workspaceBottomInsets = WindowInsets.ime
         .union(WindowInsets.navigationBars)
         .only(WindowInsetsSides.Bottom)
+    val visibleTabs = if (isRosSpace) {
+        listOf(PrimaryTab.TERMINAL, PrimaryTab.ROS_CONTROL, PrimaryTab.SSH, PrimaryTab.SHIELD)
+    } else {
+        listOf(PrimaryTab.TERMINAL, PrimaryTab.AGENTS, PrimaryTab.SSH, PrimaryTab.SHIELD, PrimaryTab.STORAGE)
+    }
 
     Row(modifier = Modifier.fillMaxSize()) {
-        // Slim scrollable 52dp Left Icon Rail (fits all 5 tabs inside 360dp landscape height!)
+        // Slim scrollable 52dp Left Icon Rail (Space toggle + active space tabs)
         Surface(
             color = WorkstationColors.SurfaceBase,
             modifier = Modifier.fillMaxHeight(),
@@ -336,11 +364,46 @@ internal fun PhoneLandscapeLayout(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                PrimaryTab.entries.forEach { tab ->
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = if (isRosSpace) WorkstationColors.AccentEmeraldWash else WorkstationColors.AccentGoldWash,
+                    border = androidx.compose.foundation.BorderStroke(
+                        1.dp,
+                        if (isRosSpace) WorkstationColors.AccentEmerald.copy(alpha = 0.55f) else WorkstationColors.BorderStrong,
+                    ),
+                    modifier = Modifier
+                        .size(width = 44.dp, height = 30.dp)
+                        .clickable {
+                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onSelectSpace(
+                                if (isRosSpace) WorkstationSpace.DEV_AI else WorkstationSpace.ROS2_CONTROL
+                            )
+                        },
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(
+                            text = if (isRosSpace) "ROS" else "DEV",
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isRosSpace) WorkstationColors.AccentEmerald else WorkstationColors.AccentGold,
+                            maxLines = 1,
+                            softWrap = false,
+                        )
+                    }
+                }
+                HorizontalDivider(
+                    thickness = 1.dp,
+                    color = WorkstationColors.BorderHairline,
+                    modifier = Modifier.padding(vertical = 2.dp),
+                )
+                visibleTabs.forEach { tab ->
                     val selected = primaryTab == tab
+                    val accentWash = if (tab == PrimaryTab.ROS_CONTROL) WorkstationColors.AccentEmeraldWash else WorkstationColors.AccentCyanWash
+                    val accentFg = if (tab == PrimaryTab.ROS_CONTROL) WorkstationColors.AccentEmerald else WorkstationColors.AccentCyan
                     Surface(
                         shape = RoundedCornerShape(10.dp),
-                        color = if (selected) WorkstationColors.AccentCyanWash else androidx.compose.ui.graphics.Color.Transparent,
+                        color = if (selected) accentWash else androidx.compose.ui.graphics.Color.Transparent,
                         modifier = Modifier
                             .size(44.dp)
                             .clickable {
@@ -352,7 +415,7 @@ internal fun PhoneLandscapeLayout(
                             Icon(
                                 imageVector = tabIcon(tab),
                                 contentDescription = tab.label,
-                                tint = if (selected) WorkstationColors.AccentCyan else WorkstationColors.TextSecondary,
+                                tint = if (selected) accentFg else WorkstationColors.TextSecondary,
                                 modifier = Modifier.size(20.dp),
                             )
                         }
@@ -397,6 +460,7 @@ internal fun PhoneLandscapeLayout(
                         },
                         onAdd = onAddSession,
                         onCloseSession = onCloseSession,
+                        emptyLabel = if (isRosSpace) "Toca + para Ubuntu ROS 2" else "Initializing runtime…",
                         modifier = Modifier.weight(1f),
                     )
                     CompactStatusPill(label = "${refreshHz}Hz", healthy = liveSessions.isNotEmpty())
@@ -441,6 +505,7 @@ internal fun PhoneLandscapeLayout(
                             slim = true,
                             onQuickCommand = onQuickCommand,
                             contentInsets = endInsets,
+                            ros2Mode = isRosSpace,
                         )
                     }
                 }
@@ -456,7 +521,11 @@ internal fun PhoneLandscapeLayout(
                                 .windowInsetsPadding(endInsets)
                                 .padding(horizontal = 12.dp, vertical = 6.dp),
                         ) {
-                            renderInspector(primaryTab.toInspectorTab())
+                            if (primaryTab == PrimaryTab.ROS_CONTROL) {
+                                renderRurPanel()
+                            } else {
+                                renderInspector(primaryTab.toInspectorTab())
+                            }
                         }
                     }
                 }
@@ -471,11 +540,13 @@ internal fun PhoneLandscapeLayout(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun TabletPortraitLayout(
+    activeSpace: WorkstationSpace,
     refreshHz: Int,
     hasHardwareKeyboard: Boolean,
     liveSessions: List<LivePtyTab>,
     activeSessionIndex: Int,
     inspectorTab: InspectorTab,
+    ros2InspectorShowSsh: Boolean,
     isSheetOpen: Boolean,
     surfaceBridge: TermuxViewSurfaceBridge,
     crdtSiteId: String,
@@ -483,17 +554,21 @@ internal fun TabletPortraitLayout(
     guardianStatus: GuardianStatus,
     storageMetrics: StorageMetrics,
     statusNotice: String,
+    onSelectSpace: (WorkstationSpace) -> Unit,
     onSelectSession: (Int) -> Unit,
     onAddSession: () -> Unit,
     onCloseSession: (Int) -> Unit,
     onOpenTutorial: () -> Unit,
     onToggleSheet: () -> Unit,
     onSelectInspectorTab: (InspectorTab) -> Unit,
+    onSelectRos2InspectorShowSsh: (Boolean) -> Unit,
     onOpenCommandPalette: () -> Unit,
     onOpenClassicTermux: () -> Unit,
     onQuickCommand: (String) -> Unit,
     renderInspector: @Composable (InspectorTab) -> Unit,
+    renderRurPanel: @Composable () -> Unit,
 ) {
+    val isRosSpace = activeSpace == WorkstationSpace.ROS2_CONTROL
     val horizontalInsets = WindowInsets.navigationBars
         .union(WindowInsets.displayCutout)
         .only(WindowInsetsSides.Horizontal)
@@ -518,16 +593,12 @@ internal fun TabletPortraitLayout(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     RurBrandBadge(size = 26.dp)
-                    Text(
-                        text = "Terminal Agents",
-                        color = WorkstationColors.TextPrimary,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
+                    WorkspaceSpaceSwitcher(
+                        activeSpace = activeSpace,
+                        compact = false,
+                        onSelectSpace = onSelectSpace,
                     )
+                    Spacer(modifier = Modifier.weight(1f))
                     CompactStatusPill(
                         label = "${refreshHz}Hz · ${if (hasHardwareKeyboard) "KB" else "Touch"}",
                         healthy = liveSessions.isNotEmpty(),
@@ -557,6 +628,7 @@ internal fun TabletPortraitLayout(
             onSelect = onSelectSession,
             onAdd = onAddSession,
             onCloseSession = onCloseSession,
+            emptyLabel = if (isRosSpace) "Toca + para Ubuntu ROS 2" else "Initializing runtime…",
         )
 
         Column(
@@ -583,12 +655,17 @@ internal fun TabletPortraitLayout(
                     slim = false,
                     onQuickCommand = onQuickCommand,
                     contentInsets = horizontalInsets,
+                    ros2Mode = isRosSpace,
                 )
             }
         }
 
         CompactTelemetryBar(
-            leftText = "PTY:${liveSessions.size} · Node:$crdtSiteId · Vault:${if (tokenState.isPresent) tokenState.posixModeOctal else "OFF"} · Wake:${if (guardianStatus.wakeLockHeld) "ON" else "OFF"} · Free:${storageMetrics.freeFormatted}",
+            leftText = if (isRosSpace) {
+                "ROS2:${liveSessions.size} · Ubuntu 24.04 Jazzy · Wake:${if (guardianStatus.wakeLockHeld) "ON" else "OFF"} · Free:${storageMetrics.freeFormatted}"
+            } else {
+                "PTY:${liveSessions.size} · Node:$crdtSiteId · Vault:${if (tokenState.isPresent) tokenState.posixModeOctal else "OFF"} · Wake:${if (guardianStatus.wakeLockHeld) "ON" else "OFF"} · Free:${storageMetrics.freeFormatted}"
+            },
             rightNotice = statusNotice,
             compactPhone = false,
             applyBottomInsets = true,
@@ -605,16 +682,30 @@ internal fun TabletPortraitLayout(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 340.dp, max = 560.dp)
+                    .heightIn(min = 340.dp, max = 580.dp)
                     .padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                InspectorSegmentedHeader(
-                    selected = inspectorTab,
-                    onSelect = onSelectInspectorTab,
-                )
-                Box(modifier = Modifier.weight(1f)) {
-                    renderInspector(inspectorTab)
+                if (isRosSpace) {
+                    Ros2InspectorHeader(
+                        showSshPi = ros2InspectorShowSsh,
+                        onSelectShowSshPi = onSelectRos2InspectorShowSsh,
+                    )
+                    Box(modifier = Modifier.weight(1f)) {
+                        if (ros2InspectorShowSsh) {
+                            renderInspector(InspectorTab.SSH)
+                        } else {
+                            renderRurPanel()
+                        }
+                    }
+                } else {
+                    InspectorSegmentedHeader(
+                        selected = inspectorTab,
+                        onSelect = onSelectInspectorTab,
+                    )
+                    Box(modifier = Modifier.weight(1f)) {
+                        renderInspector(inspectorTab)
+                    }
                 }
             }
         }
@@ -626,11 +717,13 @@ internal fun TabletPortraitLayout(
 // ============================================================================================
 @Composable
 internal fun TabletLandscapeLayout(
+    activeSpace: WorkstationSpace,
     refreshHz: Int,
     hasHardwareKeyboard: Boolean,
     liveSessions: List<LivePtyTab>,
     activeSessionIndex: Int,
     inspectorTab: InspectorTab,
+    ros2InspectorShowSsh: Boolean,
     isZenMode: Boolean,
     surfaceBridge: TermuxViewSurfaceBridge,
     crdtSiteId: String,
@@ -638,17 +731,21 @@ internal fun TabletLandscapeLayout(
     guardianStatus: GuardianStatus,
     storageMetrics: StorageMetrics,
     statusNotice: String,
+    onSelectSpace: (WorkstationSpace) -> Unit,
     onSelectSession: (Int) -> Unit,
     onAddSession: () -> Unit,
     onCloseSession: (Int) -> Unit,
     onOpenTutorial: () -> Unit,
     onSelectInspectorTab: (InspectorTab) -> Unit,
+    onSelectRos2InspectorShowSsh: (Boolean) -> Unit,
     onToggleZenMode: () -> Unit,
     onOpenCommandPalette: () -> Unit,
     onOpenClassicTermux: () -> Unit,
     onQuickCommand: (String) -> Unit,
     renderInspector: @Composable (InspectorTab) -> Unit,
+    renderRurPanel: @Composable () -> Unit,
 ) {
+    val isRosSpace = activeSpace == WorkstationSpace.ROS2_CONTROL
     val inspectorWidth by animateDpAsState(
         targetValue = if (isZenMode) 0.dp else TabletInspectorExpandedWidth,
         animationSpec = MotionTokens.PaneWidthSpring,
@@ -662,7 +759,7 @@ internal fun TabletLandscapeLayout(
         .only(WindowInsetsSides.End)
 
     Column(modifier = Modifier.fillMaxSize()) {
-        // Unified 48dp Desktop Titlebar (Brand + Live Session Tabs + Actions)
+        // Unified 48dp Desktop Titlebar (Brand + Space Switcher + Live Session Tabs + Actions)
         Surface(color = WorkstationColors.SurfaceBase, modifier = Modifier.fillMaxWidth()) {
             Column(
                 modifier = Modifier
@@ -682,14 +779,10 @@ internal fun TabletLandscapeLayout(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     RurBrandBadge(size = 26.dp)
-                    Text(
-                        text = "RUR Agents",
-                        color = WorkstationColors.TextPrimary,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis,
+                    WorkspaceSpaceSwitcher(
+                        activeSpace = activeSpace,
+                        compact = false,
+                        onSelectSpace = onSelectSpace,
                     )
                     VerticalDivider(
                         thickness = 1.dp,
@@ -703,6 +796,7 @@ internal fun TabletLandscapeLayout(
                         onSelect = onSelectSession,
                         onAdd = onAddSession,
                         onCloseSession = onCloseSession,
+                        emptyLabel = if (isRosSpace) "Toca + para Ubuntu ROS 2" else "Initializing runtime…",
                         modifier = Modifier.weight(1f),
                     )
                     CompactStatusPill(
@@ -761,6 +855,7 @@ internal fun TabletLandscapeLayout(
                         slim = false,
                         onQuickCommand = onQuickCommand,
                         contentInsets = startInsets,
+                        ros2Mode = isRosSpace,
                     )
                 }
             }
@@ -783,12 +878,26 @@ internal fun TabletLandscapeLayout(
                             .padding(horizontal = 12.dp, vertical = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        InspectorSegmentedHeader(
-                            selected = inspectorTab,
-                            onSelect = onSelectInspectorTab,
-                        )
-                        Box(modifier = Modifier.weight(1f)) {
-                            renderInspector(inspectorTab)
+                        if (isRosSpace) {
+                            Ros2InspectorHeader(
+                                showSshPi = ros2InspectorShowSsh,
+                                onSelectShowSshPi = onSelectRos2InspectorShowSsh,
+                            )
+                            Box(modifier = Modifier.weight(1f)) {
+                                if (ros2InspectorShowSsh) {
+                                    renderInspector(InspectorTab.SSH)
+                                } else {
+                                    renderRurPanel()
+                                }
+                            }
+                        } else {
+                            InspectorSegmentedHeader(
+                                selected = inspectorTab,
+                                onSelect = onSelectInspectorTab,
+                            )
+                            Box(modifier = Modifier.weight(1f)) {
+                                renderInspector(inspectorTab)
+                            }
                         }
                     }
                 }
@@ -796,7 +905,11 @@ internal fun TabletLandscapeLayout(
         }
 
         CompactTelemetryBar(
-            leftText = "PTY:${liveSessions.size} · Node:$crdtSiteId · Vault:${if (tokenState.isPresent) tokenState.posixModeOctal else "OFF"} · Wake:${if (guardianStatus.wakeLockHeld) "ON" else "OFF"} · Free:${storageMetrics.freeFormatted}",
+            leftText = if (isRosSpace) {
+                "ROS2:${liveSessions.size} · Ubuntu 24.04 Jazzy · Wake:${if (guardianStatus.wakeLockHeld) "ON" else "OFF"} · Free:${storageMetrics.freeFormatted}"
+            } else {
+                "PTY:${liveSessions.size} · Node:$crdtSiteId · Vault:${if (tokenState.isPresent) tokenState.posixModeOctal else "OFF"} · Wake:${if (guardianStatus.wakeLockHeld) "ON" else "OFF"} · Free:${storageMetrics.freeFormatted}"
+            },
             rightNotice = statusNotice,
             compactPhone = false,
             applyBottomInsets = true,
@@ -809,5 +922,6 @@ private fun PrimaryTab.toInspectorTab(): InspectorTab = when (this) {
     PrimaryTab.SSH -> InspectorTab.SSH
     PrimaryTab.SHIELD -> InspectorTab.SHIELD
     PrimaryTab.STORAGE -> InspectorTab.STORAGE
-    PrimaryTab.TERMINAL -> InspectorTab.AGENTS
+    PrimaryTab.TERMINAL,
+    PrimaryTab.ROS_CONTROL -> InspectorTab.AGENTS
 }

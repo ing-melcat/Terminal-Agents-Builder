@@ -1047,6 +1047,226 @@ class TermuxWorkstationCustomLayerTest {
         val updater = GitHubReleaseUpdater(context, currentTag = "v1.2", ioDispatcher = testDispatcher)
         assertFalse(updater.openAddonUninstall(context, "com.android.settings"))
     }
+
+    @Test
+    fun `RurControlCenterManager pairs PAGE_RUR DB login, 2FA, RAM-only LiveKit tokens, and ephemeral 0600 env without argv leak`() = runTest(testDispatcher) {
+        val tempRoot = java.nio.file.Files.createTempDirectory("melcat-rur-v2-test").toFile()
+        val serverSocket = java.net.ServerSocket(0, 50, java.net.InetAddress.getByName("127.0.0.1"))
+        val running = java.util.concurrent.atomic.AtomicBoolean(true)
+        val capturedLoginBody = java.util.concurrent.atomic.AtomicReference("")
+        val capturedCsrfHeader = java.util.concurrent.atomic.AtomicReference("")
+        val mockLiveKitJwt = "eyJhbGciOiJIUzI1NiJ9.mock_operator_livekit_jwt_secret.sig"
+
+        val serverThread = Thread {
+            while (running.get()) {
+                val sock = try {
+                    serverSocket.accept()
+                } catch (_: Throwable) {
+                    break
+                }
+                try {
+                    sock.soTimeout = 3000
+                    val reader = sock.getInputStream().bufferedReader(Charsets.UTF_8)
+                    val requestLine = reader.readLine() ?: continue
+                    val parts = requestLine.split(" ")
+                    val path = parts.getOrNull(1).orEmpty()
+                    val headers = LinkedHashMap<String, String>()
+                    while (true) {
+                        val line = reader.readLine() ?: break
+                        if (line.isEmpty()) break
+                        val idx = line.indexOf(':')
+                        if (idx > 0) {
+                            headers[line.substring(0, idx).trim().lowercase()] = line.substring(idx + 1).trim()
+                        }
+                    }
+                    val contentLen = headers["content-length"]?.toIntOrNull() ?: 0
+                    val bodyBuf = CharArray(contentLen)
+                    var read = 0
+                    while (read < contentLen) {
+                        val n = reader.read(bodyBuf, read, contentLen - read)
+                        if (n <= 0) break
+                        read += n
+                    }
+                    val reqBody = String(bodyBuf, 0, read)
+
+                    val (extraHeaders, jsonResp) = when (path) {
+                        "/api/login" -> {
+                            capturedLoginBody.set(reqBody)
+                            listOf(
+                                "Set-Cookie: rur_session=sess_abc; Path=/; HttpOnly",
+                                "Set-Cookie: rur_csrf=csrf_xyz_99; Path=/",
+                            ) to """{"success":true,"token":"jwt-operator-bearer-123","user":{"id":7,"matricula":"23040123","nombre":"Luis Antonio","alias":"Melcat","grupo":"IIA-8","roles":["operador"],"totp_enabled":false,"debe_cambiar_password":false}}"""
+                        }
+                        "/api/robots" -> emptyList<String>() to """[{"id":"rassor-1","name":"RASSOR-1","status":"online","room":"room-rassor","rosDomainId":42,"livekitUrl":"wss://rassor.livekit.cloud","version":2},{"id":"rover-2","name":"ROVER-LAB","status":"offline","room":"room-2","rosDomainId":44,"livekitUrl":"wss://lab.livekit.cloud","version":1}]"""
+                        "/api/livekit-token" -> {
+                            capturedCsrfHeader.set(headers["x-csrf-token"].orEmpty())
+                            emptyList<String>() to """{"success":true,"token":"$mockLiveKitJwt","livekitUrl":"wss://rassor.livekit.cloud","room":"room-rassor"}"""
+                        }
+                        "/api/profile/2fa/generate" -> emptyList<String>() to """{"success":true,"secret":"JBSWY3DPEHPK3PXP","otpauth":"otpauth://totp/RUR:23040123?secret=JBSWY3DPEHPK3PXP"}"""
+                        "/api/profile/2fa/enable" -> emptyList<String>() to """{"success":true,"message":"2FA enabled"}"""
+                        else -> emptyList<String>() to """{"success":false}"""
+                    }
+
+                    val respBytes = jsonResp.toByteArray(Charsets.UTF_8)
+                    val out = sock.getOutputStream()
+                    val head = buildString {
+                        append("HTTP/1.1 200 OK\r\n")
+                        append("Content-Type: application/json\r\n")
+                        extraHeaders.forEach { append(it).append("\r\n") }
+                        append("Content-Length: ${respBytes.size}\r\n")
+                        append("Connection: close\r\n\r\n")
+                    }
+                    out.write(head.toByteArray(Charsets.UTF_8))
+                    out.write(respBytes)
+                    out.flush()
+                } finally {
+                    runCatching { sock.close() }
+                }
+            }
+        }.apply { isDaemon = true; start() }
+
+        try {
+            val homeDir = java.io.File(tempRoot, "home").apply { mkdirs() }
+            val prefixDir = java.io.File(tempRoot, "usr").apply { mkdirs() }
+            java.io.File(prefixDir, "bin").apply { mkdirs() }
+            java.io.File(prefixDir, "bin/proot-distro").apply { writeText("#!/bin/sh\n"); setExecutable(true) }
+            java.io.File(prefixDir, "var/lib/proot-distro/installed-rootfs/ubuntu/bin").apply { mkdirs() }
+            java.io.File(prefixDir, "var/lib/proot-distro/installed-rootfs/ubuntu/bin/bash").apply { writeText("#!/bin/sh\n"); setExecutable(true) }
+            java.io.File(prefixDir, "var/lib/proot-distro/installed-rootfs/ubuntu/opt/ros/jazzy").apply { mkdirs() }
+            java.io.File(prefixDir, "var/lib/proot-distro/installed-rootfs/ubuntu/opt/ros/jazzy/setup.bash").writeText("# jazzy\n")
+
+            val manager = com.termux.custom.rur.RurControlCenterManager(homeDir = homeDir, prefixDir = prefixDir)
+            val port = serverSocket.localPort
+
+            // 1. Configure loopback PAGE_RUR test server + custom offboard_ws receiver command
+            val configured = manager.saveSettings(
+                webApiUrl = "http://127.0.0.1:$port",
+                deviceKeyInput = null,
+                defaultRosDomainId = 42,
+                offboardRepoPath = "RUR/rover_rassor_project-",
+                scriptsPath = "RUR/monitoring_center_control",
+                linkedPiSshDeviceId = "pi-1",
+                customScripts = mapOf(
+                    com.termux.custom.rur.RurEditableScriptSlot.LIVEKIT_RECEIVER_LAUNCH.key to
+                        "ros2 launch rover_rassor_bringup livekit_receiver.launch.py use_rviz:=false"
+                ),
+            ).getOrThrow()
+            assertTrue(configured.ros2Ready)
+            assertEquals("pi-1", configured.linkedPiSshDeviceId)
+
+            // 2. Login against mock PAGE_RUR DB API
+            val loggedIn = manager.loginOperator("23040123", "123456").getOrThrow()
+            assertTrue(capturedLoginBody.get().contains("\"matricula\":\"23040123\""))
+            assertTrue(capturedLoginBody.get().contains("\"password\":\"123456\""))
+            assertTrue(capturedLoginBody.get().contains("\"code\":\"123456\""))
+            assertEquals("csrf_xyz_99", capturedCsrfHeader.get())
+            assertTrue(loggedIn.isAuthenticated)
+            assertEquals("Melcat", loggedIn.operatorSession?.displayName)
+            assertEquals("OPERADOR", loggedIn.operatorSession?.primaryRoleLabel)
+            assertTrue(loggedIn.operatorSession?.canOperate == true)
+            assertEquals(2, loggedIn.robots.size)
+            assertTrue(loggedIn.hasLiveRamToken)
+            assertEquals("operator_db", loggedIn.liveTokenSource)
+
+            // 3. Zero-Exposure: LiveKit JWT must NEVER be persisted to rur-ops.json or rur-operator-session.json
+            val opsJsonText = java.io.File(homeDir, ".config/melcat/rur-ops.json").readText()
+            val sessJsonText = java.io.File(homeDir, ".config/melcat/vault/rur-operator-session.json").readText()
+            assertFalse("LiveKit token must NOT be written to rur-ops.json", opsJsonText.contains(mockLiveKitJwt))
+            assertFalse("LiveKit token must NOT be written to operator session", sessJsonText.contains(mockLiveKitJwt))
+            assertFalse("Operator bearer must NOT leak into rur-ops.json", opsJsonText.contains("jwt-operator-bearer-123"))
+
+            // 4. PTY execve must NEVER expose LIVEKIT_TOKEN on argv[], MUST pass "-c" as arguments[0] (TermuxService prepends executablePath)
+            val rxMod = com.termux.custom.rur.RurControlCatalog.byId("livekit_rx_pc")!!
+            val (shBin, argv) = manager.buildModulePtyExec(rxMod, loggedIn)
+            assertTrue(shBin.endsWith("/bin/sh"))
+            assertEquals("-c", argv[0])
+            assertFalse("LIVEKIT_TOKEN must NEVER appear in argv[]", argv.any { it.contains(mockLiveKitJwt) })
+            assertTrue("Custom editable receiver command should be passed as positional arg", argv.last().contains("use_rviz:=false"))
+            val envFileArg = argv.first { it.contains(".cache/melcat-rur/.env.") }
+            val envContent = java.io.File(envFileArg).readText()
+            assertTrue(envContent.contains("export LIVEKIT_TOKEN='$mockLiveKitJwt'"))
+            assertTrue(envContent.contains("export ROS_DOMAIN_ID='42'"))
+            manager.cleanupEphemeralEnvFromArgv(argv)
+            assertFalse("Ephemeral env file must be securely deleted on cleanup", java.io.File(envFileArg).exists())
+
+            val (_, installArgv) = manager.buildInstallRos2PtyExec()
+            assertEquals("-c", installArgv[0])
+            val (_, aiArgv) = manager.buildRos2AiAgentPtyExec("agy", loggedIn)
+            assertEquals("-c", aiArgv[0])
+            manager.cleanupEphemeralEnvFromArgv(aiArgv)
+
+            // 5. 2FA generate + enable against PAGE_RUR
+            val twoFa = manager.generateOperator2fa().getOrThrow()
+            assertEquals("JBSWY3DPEHPK3PXP", twoFa.secret)
+            val after2fa = manager.enableOperator2fa("123456", twoFa.secret).getOrThrow()
+            assertTrue(after2fa.operatorSession?.totpEnabled == true)
+
+            // 6. Logout wipes 0600 session file AND RAM LiveKit tokens
+            val afterLogout = manager.logoutOperator()
+            assertFalse(afterLogout.isAuthenticated)
+            assertFalse(afterLogout.hasLiveRamToken)
+            assertFalse(java.io.File(homeDir, ".config/melcat/vault/rur-operator-session.json").exists())
+        } finally {
+            running.set(false)
+            runCatching { serverSocket.close() }
+            runCatching { serverThread.join(1000) }
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `RurControlCenterManager enforces HTTPS URL policy, flexible DB roles, editable command validation, and Dual-Space teardown rules`() = runTest(testDispatcher) {
+        // Remote plain HTTP and embedded userinfo credentials must be rejected
+        assertTrue(com.termux.custom.rur.RurControlCenterManager.validateWebApiUrl("http://rur.unipolidgo.edu.mx").isFailure)
+        assertTrue(com.termux.custom.rur.RurControlCenterManager.validateWebApiUrl("https://user:pass@rur.unipolidgo.edu.mx").isFailure)
+        assertTrue(com.termux.custom.rur.RurControlCenterManager.validateWebApiUrl("https://rur.unipolidgo.edu.mx/").isSuccess)
+        assertTrue(com.termux.custom.rur.RurControlCenterManager.validateWebApiUrl("http://127.0.0.1:3001").isSuccess)
+
+        // Legacy `rol` string and modern `roles` JSONB array both parse accurately
+        val legacyUser = org.json.JSONObject("""{"matricula":"admin","nombre":"Admin","rol":"admin"}""")
+        val legacyParsed = com.termux.custom.rur.RurControlCenterManager.parseOperatorSessionFromUserJson(legacyUser, "admin", true)
+        assertTrue(legacyParsed.isAdmin)
+        assertTrue(legacyParsed.canOperate)
+
+        val memberUser = org.json.JSONObject("""{"matricula":"23040999","nombre":"Visitante","roles":["miembro"]}""")
+        val memberParsed = com.termux.custom.rur.RurControlCenterManager.parseOperatorSessionFromUserJson(memberUser, "23040999", true)
+        assertFalse(memberParsed.canOperate)
+        assertEquals("MIEMBRO", memberParsed.primaryRoleLabel)
+
+        // Dual-Space tab separation: Teardown ROS stops ONLY ros:* nodes, NEVER ros-ai:*, ros-ssh:*, or Dev & IA tabs
+        assertTrue(com.termux.custom.rur.RurControlCenterManager.isRos2SessionTitle("ros:livekit_rx_pc"))
+        assertTrue(com.termux.custom.rur.RurControlCenterManager.isRos2NodeSessionTitle("ros:livekit_rx_pc"))
+        assertTrue(com.termux.custom.rur.RurControlCenterManager.isLiveKitReceiverSessionTitle("ros:livekit_rx_pc"))
+
+        assertTrue(com.termux.custom.rur.RurControlCenterManager.isRos2SessionTitle("ros-ai:agy"))
+        assertFalse("AI sessions MUST survive Teardown ROS", com.termux.custom.rur.RurControlCenterManager.isRos2NodeSessionTitle("ros-ai:agy"))
+
+        assertTrue(com.termux.custom.rur.RurControlCenterManager.isRos2SessionTitle("ros-ssh:pi"))
+        assertFalse("SSH Pi sessions MUST survive Teardown ROS", com.termux.custom.rur.RurControlCenterManager.isRos2NodeSessionTitle("ros-ssh:pi"))
+
+        assertFalse(com.termux.custom.rur.RurControlCenterManager.isRos2SessionTitle("agy-main"))
+        assertFalse(com.termux.custom.rur.RurControlCenterManager.isRos2NodeSessionTitle("agy-main"))
+
+        // Reject newline command injection in editable receiver script slot
+        val tempRoot = java.nio.file.Files.createTempDirectory("melcat-rur-val-test").toFile()
+        try {
+            val manager = com.termux.custom.rur.RurControlCenterManager(homeDir = tempRoot, prefixDir = tempRoot)
+            val badCmd = manager.saveSettings(
+                webApiUrl = "https://rur.unipolidgo.edu.mx",
+                deviceKeyInput = null,
+                defaultRosDomainId = 42,
+                offboardRepoPath = "RUR/rover_rassor_project-",
+                scriptsPath = "RUR/monitoring_center_control",
+                linkedPiSshDeviceId = "",
+                customScripts = mapOf(
+                    com.termux.custom.rur.RurEditableScriptSlot.LIVEKIT_RECEIVER_LAUNCH.key to "ros2 launch foo\nrm -rf /"
+                ),
+            )
+            assertTrue(badCmd.isFailure)
+        } finally {
+            tempRoot.deleteRecursively()
+        }
+    }
 }
 
 

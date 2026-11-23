@@ -242,4 +242,36 @@ object WorkstationIcons {
             lineTo(18.5f, 19.5f)
         }
     }
+
+    val Robotics: ImageVector by lazy {
+        strokedIcon("Robotics") {
+            // Antenna
+            moveTo(12f, 3.5f)
+            lineTo(12f, 6.5f)
+            // Rover / robot head chassis
+            moveTo(6f, 6.5f)
+            lineTo(18f, 6.5f)
+            quadTo(19.5f, 6.5f, 19.5f, 8f)
+            lineTo(19.5f, 15.5f)
+            quadTo(19.5f, 17f, 18f, 17f)
+            lineTo(6f, 17f)
+            quadTo(4.5f, 17f, 4.5f, 15.5f)
+            lineTo(4.5f, 8f)
+            quadTo(4.5f, 6.5f, 6f, 6.5f)
+            close()
+            // Sensor eyes / LiDAR optics
+            moveTo(9f, 11.2f)
+            lineTo(9.8f, 11.2f)
+            moveTo(14.2f, 11.2f)
+            lineTo(15f, 11.2f)
+            // Telemetry wave bar
+            moveTo(8.5f, 14.3f)
+            lineTo(15.5f, 14.3f)
+            // Rover wheels
+            moveTo(7f, 17f)
+            lineTo(7f, 20f)
+            moveTo(17f, 17f)
+            lineTo(17f, 20f)
+        }
+    }
 }

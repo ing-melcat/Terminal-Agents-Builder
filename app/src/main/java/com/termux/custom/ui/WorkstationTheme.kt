@@ -99,8 +99,14 @@ fun resolveFormFactor(widthDp: Int, heightDp: Int): WorkstationFormFactor = when
     else -> WorkstationFormFactor.TABLET_LANDSCAPE
 }
 
+enum class WorkstationSpace(val label: String, val shortLabel: String) {
+    DEV_AI("Dev & IA", "Dev"),
+    ROS2_CONTROL("ROS 2", "ROS 2"),
+}
+
 enum class PrimaryTab(val label: String) {
     TERMINAL("Terminal"),
+    ROS_CONTROL("Control"),
     AGENTS("Agents"),
     SSH("SSH"),
     SHIELD("Shield"),

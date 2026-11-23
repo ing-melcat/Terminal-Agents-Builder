@@ -6,7 +6,7 @@ set -eu
 
 PREFIX="/data/data/com.termux/files/usr"
 HOME_DIR="/data/data/com.termux/files/home"
-STAMP_FILE="$HOME_DIR/.config/melcat/.bootstrap_provisioned_v12"
+STAMP_FILE="$HOME_DIR/.config/melcat/.bootstrap_provisioned_v13"
 
 export PATH="$PREFIX/bin:$PATH"
 export HOME="$HOME_DIR"
@@ -52,10 +52,11 @@ for LINK_TARGET in \
     fi
 done
 
-# 2. Seed core active skills (senior-auditor, motion-framer, caveman) ONLY if absent (never overwrites agent/user edits!)
+# 2. Seed core active skills ONLY if absent (never overwrites agent/user edits!)
 mkdir -p "$HOME_DIR/.gemini/config/skills/senior-auditor" \
          "$HOME_DIR/.gemini/config/skills/motion-framer" \
-         "$HOME_DIR/.gemini/config/skills/caveman"
+         "$HOME_DIR/.gemini/config/skills/caveman" \
+         "$HOME_DIR/.gemini/config/skills/rur-ros2-rassor"
 
 if [ ! -f "$HOME_DIR/.gemini/config/skills/senior-auditor/SKILL.md" ]; then
     cat > "$HOME_DIR/.gemini/config/skills/senior-auditor/SKILL.md" <<'EOF'
@@ -88,6 +89,22 @@ description: Ultra-concise zero-fluff technical response mode for fast mobile te
 ---
 # Caveman Mode
 Keep explanations ultra-brief, direct, and high-signal for narrow smartphone screens. Skip filler prose; output exact commands, root causes, and diffs first.
+EOF
+fi
+
+if [ ! -f "$HOME_DIR/.gemini/config/skills/rur-ros2-rassor/SKILL.md" ]; then
+    cat > "$HOME_DIR/.gemini/config/skills/rur-ros2-rassor/SKILL.md" <<'EOF'
+---
+name: rur-ros2-rassor
+description: RUR (UNIPOLI) Rover RASSOR ROS 2 Jazzy offboard_ws + LiveKit WebRTC ground-station assistant
+---
+# RUR Rover RASSOR — ROS 2 Jazzy (offboard_ws)
+Context for diagnosing, building, and editing `rover_rassor_project-/offboard_ws` inside Ubuntu 24.04 (`proot-distro`) on ARM64:
+- **ROS 2 Distro & Middleware:** ROS 2 Jazzy (`/opt/ros/jazzy/setup.bash`), `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`, default `ROS_DOMAIN_ID=42`.
+- **LiveKit Prerequisite:** Rover sensor topics (`PointCloud2`, RGB, LZ4 depth, IMU, movement) arrive over **LiveKit Cloud WebRTC**, NOT DDS over Tailscale. One of the LiveKit receiver scripts (`livekit_receiver.launch.py`, `livekit_agent`, or `robot_receiver_prod.py`) MUST be running in another console tab before `ros2 topic list`, `slam_toolbox`, `nav2`, or `foxglove_bridge` will see rover topics.
+- **Headless 3D Visualization:** Avoid heavy X11 RViz2 inside Android `proot`; use `foxglove_bridge` (`ws://127.0.0.1:8765`) for WebGL 3D inspection.
+- **Packages (`offboard_ws/src`):** `livekit_agent`, `rover_rassor_bringup`, `rover_rassor_description`, `rover_rassor_mapping`, `rover_rassor_navigation`, `rover_rassor_planning` (C++ A* / Dijkstra).
+- **Security:** Never print or commit `LIVEKIT_TOKEN`, `.env`, or `~/.config/melcat/vault/*`.
 EOF
 fi
 
@@ -160,6 +177,8 @@ if [ "${1:-}" = "--snapshot" ]; then
             --exclude='*credentials*' --exclude='*auth.json*' \
             --exclude='.ssh*' \
             --exclude='.config/melcat/ssh-devices.json*' \
+            --exclude='.config/melcat/rur-ops.json*' \
+            --exclude='.cache/melcat-rur*' \
             --exclude='*id_ed25519*' --exclude='*id_rsa*' --exclude='*.pem' \
             --exclude='*/.git/config' \
             --exclude='.gemini/antigravity-cli/antigravity-oauth-token' \
@@ -187,6 +206,8 @@ if [ "${1:-}" = "--snapshot" ]; then
             --exclude='*credentials*' --exclude='*auth.json*' \
             --exclude='.ssh*' \
             --exclude='.config/melcat/ssh-devices.json*' \
+            --exclude='.config/melcat/rur-ops.json*' \
+            --exclude='.cache/melcat-rur*' \
             --exclude='*id_ed25519*' --exclude='*id_rsa*' --exclude='*.pem' \
             --exclude='*/.git/config' \
             --exclude='.gemini/antigravity-cli/antigravity-oauth-token' \
@@ -754,6 +775,137 @@ manage_skills() {
     esac
 }
 
+install_ros2_ubuntu() {
+    echo "[workstation] Instalando Ubuntu 24.04 (proot-distro) + ROS 2 Jazzy (offboard_ws)..."
+    export DEBIAN_FRONTEND=noninteractive
+    pkg update -y
+    pkg install -y -o Dpkg::Options::=--force-confold proot-distro curl ca-certificates git
+
+    UBUNTU_ROOT="$PREFIX/var/lib/proot-distro/installed-rootfs/ubuntu"
+    if [ ! -d "$UBUNTU_ROOT" ] || [ ! -x "$UBUNTU_ROOT/bin/bash" ]; then
+        echo "[workstation] Descargando Ubuntu 24.04 ARM64..."
+        proot-distro install ubuntu
+    else
+        echo "[workstation] Ubuntu 24.04 ya existe en proot-distro — verificando ROS 2 Jazzy..."
+    fi
+
+    echo "[workstation] Configurando repositorio oficial ROS 2 Jazzy (signed-by GPG) + paquetes offboard_ws..."
+    proot-distro login ubuntu \
+        --bind "$HOME_DIR:$HOME_DIR" \
+        --bind "$PREFIX:$PREFIX" \
+        -- /bin/bash -ec '
+            set -euo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends \
+                locales curl gnupg2 lsb-release ca-certificates software-properties-common \
+                git build-essential python3-pip python3-venv python3-lz4
+            locale-gen en_US en_US.UTF-8 || true
+            update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 || true
+            add-apt-repository -y universe || true
+
+            mkdir -p /usr/share/keyrings
+            curl -fsSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+                -o /usr/share/keyrings/ros-archive-keyring.gpg
+            chmod 0644 /usr/share/keyrings/ros-archive-keyring.gpg
+
+            ARCH="$(dpkg --print-architecture)"
+            CODENAME="$(. /etc/os-release && printf "%s" "${UBUNTU_CODENAME:-noble}")"
+            printf "deb [arch=%s signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu %s main\n" \
+                "$ARCH" "$CODENAME" > /etc/apt/sources.list.d/ros2.list
+
+            apt-get update
+            apt-get install -y --no-install-recommends \
+                ros-jazzy-ros-base \
+                ros-jazzy-rmw-cyclonedds-cpp \
+                ros-jazzy-depthimage-to-laserscan \
+                ros-jazzy-slam-toolbox \
+                ros-jazzy-navigation2 \
+                ros-jazzy-nav2-bringup \
+                ros-jazzy-foxglove-bridge \
+                python3-colcon-common-extensions \
+                python3-rosdep
+
+            echo "[workstation] Instalando SDK Python de LiveKit (best-effort)..."
+            pip3 install --break-system-packages --upgrade livekit livekit-api python-dotenv lz4 2>/dev/null || true
+
+            # Bridges to Termux native AI agents inside Ubuntu (without polluting LD_LIBRARY_PATH)
+            printf "#!/bin/sh\nexport HOME=\"%s\"\nexport BROWSER=\"%s/bin/termux-open-url\"\nif [ -r \"\$HOME/.config/melcat/vault/providers.env\" ]; then . \"\$HOME/.config/melcat/vault/providers.env\"; fi\nexec \"%s/bin/agy\" \"\$@\"\n" \
+                "$1" "$2" "$2" > /usr/local/bin/agy
+            printf "#!/bin/sh\nexport HOME=\"%s\"\nexport BROWSER=\"%s/bin/termux-open-url\"\nif [ -r \"\$HOME/.config/melcat/vault/providers.env\" ]; then . \"\$HOME/.config/melcat/vault/providers.env\"; fi\nexec \"%s/bin/opencode\" \"\$@\"\n" \
+                "$1" "$2" "$2" > /usr/local/bin/opencode
+            chmod 0755 /usr/local/bin/agy /usr/local/bin/opencode
+
+            printf "# RUR ROS 2 Jazzy defaults\nexport RMW_IMPLEMENTATION=rmw_cyclonedds_cpp\nexport ROS_DOMAIN_ID=\${ROS_DOMAIN_ID:-42}\n" \
+                > /etc/profile.d/rur-ros2.sh
+            chmod 0644 /etc/profile.d/rur-ros2.sh
+            apt-get clean
+        ' _ "$HOME_DIR" "$PREFIX"
+
+    echo "[workstation] Ubuntu 24.04 + ROS 2 Jazzy + puentes agy/opencode LISTOS."
+    echo "[workstation] Cambia al espacio 'ROS 2' en la barra superior o ejecuta 'workstation ros2'."
+}
+
+run_ros2_cli() {
+    SUB="${1:-shell}"
+    UBUNTU_ROOT="$PREFIX/var/lib/proot-distro/installed-rootfs/ubuntu"
+    case "$SUB" in
+        doctor|status)
+            echo "[workstation] ROS 2 Jazzy Doctor:"
+            if [ -x "$PREFIX/bin/proot-distro" ]; then
+                echo "  [ok]      proot-distro"
+            else
+                echo "  [missing] proot-distro -> run 'workstation install-ros2'"
+            fi
+            if [ -x "$UBUNTU_ROOT/bin/bash" ]; then
+                echo "  [ok]      Ubuntu 24.04 rootfs"
+            else
+                echo "  [missing] Ubuntu 24.04 -> run 'workstation install-ros2'"
+            fi
+            if [ -f "$UBUNTU_ROOT/opt/ros/jazzy/setup.bash" ]; then
+                echo "  [ok]      ROS 2 Jazzy (/opt/ros/jazzy/setup.bash)"
+            else
+                echo "  [missing] ROS 2 Jazzy -> run 'workstation install-ros2'"
+            fi
+            if [ -x "$UBUNTU_ROOT/usr/local/bin/agy" ] && [ -x "$UBUNTU_ROOT/usr/local/bin/opencode" ]; then
+                echo "  [ok]      Ubuntu AI bridges (/usr/local/bin/agy, opencode)"
+            else
+                echo "  [opt]     Ubuntu AI bridges -> run 'workstation install-ros2'"
+            fi
+            ;;
+        shell|"")
+            if [ ! -x "$PREFIX/bin/proot-distro" ] || [ ! -f "$UBUNTU_ROOT/opt/ros/jazzy/setup.bash" ]; then
+                echo "[workstation] ROS 2 Jazzy no está instalado aún. Ejecuta 'workstation install-ros2'." >&2
+                return 1
+            fi
+            exec "$PREFIX/bin/proot-distro" login ubuntu \
+                --bind "$HOME_DIR:$HOME_DIR" \
+                --bind "$PREFIX:$PREFIX" \
+                -- /bin/bash -lc '
+                    export HOME="$1"
+                    export BROWSER="$2/bin/termux-open-url"
+                    export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-42}"
+                    export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+                    if [ -r "$HOME/.config/melcat/vault/providers.env" ]; then . "$HOME/.config/melcat/vault/providers.env"; fi
+                    if [ -r /opt/ros/jazzy/setup.bash ]; then set +u 2>/dev/null || true; . /opt/ros/jazzy/setup.bash; fi
+                    if [ -r "$HOME/RUR/rover_rassor_project-/offboard_ws/install/setup.bash" ]; then
+                        . "$HOME/RUR/rover_rassor_project-/offboard_ws/install/setup.bash"
+                    fi
+                    if [ -d "$HOME/RUR/rover_rassor_project-/offboard_ws" ]; then
+                        cd "$HOME/RUR/rover_rassor_project-/offboard_ws"
+                    else
+                        cd "$HOME"
+                    fi
+                    exec /bin/bash -i
+                ' _ "$HOME_DIR" "$PREFIX"
+            ;;
+        *)
+            echo "Usage: workstation ros2 [shell | doctor]" >&2
+            return 2
+            ;;
+    esac
+}
+
 print_help() {
     echo "============================================================"
     echo " Terminal Agents Builder (RUR) — Workstation Controller"
@@ -773,6 +925,11 @@ print_help() {
     else
         echo " OpenSSH    : NOT INSTALLED (run 'workstation install-ssh')"
     fi
+    if [ -f "$PREFIX/var/lib/proot-distro/installed-rootfs/ubuntu/opt/ros/jazzy/setup.bash" ]; then
+        echo " ROS 2 Jazzy: INSTALLED (Ubuntu 24.04 proot-distro)"
+    else
+        echo " ROS 2 Jazzy: OPTIONAL (run 'workstation install-ros2')"
+    fi
     echo " Skills Dir : $SKILLS_DIR ($(ls -1 "$SKILLS_DIR" 2>/dev/null | tr '\n' ' '))"
     if TF="$(find_active_token 2>/dev/null)"; then
         echo " OAuth Vault: ACTIVE ($TF, mode $(file_mode_str "$TF"))"
@@ -787,11 +944,13 @@ print_help() {
     echo "   workstation install-agy     -> Install/reinstall native Antigravity CLI"
     echo "   workstation install-opencode-> Install/upgrade native Bionic OpenCode v2"
     echo "   workstation install-ssh     -> Install native OpenSSH client (LAN & Tailscale)"
+    echo "   workstation install-ros2    -> Install Ubuntu 24.04 + ROS 2 Jazzy + AI bridges"
+    echo "   workstation ros2 [doctor]   -> Enter Ubuntu ROS 2 Jazzy shell or diagnose"
     echo "   workstation upgrade         -> Upgrade Termux packages (incl. opencode) + agy"
-    echo "   workstation doctor          -> Diagnose agy, opencode, ssh, glibc, TLS & vaults"
+    echo "   workstation doctor          -> Diagnose agy, opencode, ssh, ros2, glibc & vaults"
     echo "   workstation skills [cmd]    -> Manage Git skill repos (list|init|add|update|diff|push)"
     echo "   workstation token           -> Check Antigravity OAuth & Coding Vault 0600"
-    echo "   workstation ui [ssh|agents] -> Bring 120Hz Workstation UI (or panel) to front"
+    echo "   workstation ui [ros2|ssh]   -> Bring 120Hz Workstation UI (or space/panel) to front"
     echo "   melcat-gc                   -> Clean caches & create zstd backups"
     echo "============================================================"
 }
@@ -825,6 +984,13 @@ case "${1:-ui}" in
     install-ssh|install-openssh)
         install_openssh
         ;;
+    install-ros2|reinstall-ros2)
+        install_ros2_ubuntu
+        ;;
+    ros2|--ros2)
+        shift
+        run_ros2_cli "${1:-shell}"
+        ;;
     upgrade|--upgrade)
         echo "[workstation] Upgrading Termux packages (including OpenCode if installed)..."
         export DEBIAN_FRONTEND=noninteractive
@@ -854,6 +1020,12 @@ case "${1:-ui}" in
         if [ -s "$VAULT_DIR/ollama.url" ]; then
             echo "[workstation] Ollama LAN endpoint: $(cat "$VAULT_DIR/ollama.url")"
         fi
+        if [ -s "$VAULT_DIR/rur-operator-session.json" ]; then
+            echo "[workstation] RUR Operator Session: ACTIVE (mode: $(file_mode_str "$VAULT_DIR/rur-operator-session.json"))"
+        fi
+        if [ -s "$VAULT_DIR/rur-device.key" ]; then
+            echo "[workstation] RUR Device Key: ACTIVE (mode: $(file_mode_str "$VAULT_DIR/rur-device.key"))"
+        fi
         ;;
     doctor|--doctor)
         echo "[workstation] Doctor — $(uname -m) / Android $(getprop ro.build.version.release 2>/dev/null || echo '?')"
@@ -874,6 +1046,11 @@ case "${1:-ui}" in
             echo "  [ok]      openssh ($SSHVER)"
         else
             echo "  [opt]     openssh (SSH & Tailscale) -> run 'workstation install-ssh'"
+        fi
+        if [ -f "$PREFIX/var/lib/proot-distro/installed-rootfs/ubuntu/opt/ros/jazzy/setup.bash" ]; then
+            echo "  [ok]      ROS 2 Jazzy (Ubuntu 24.04 proot-distro)"
+        else
+            echo "  [opt]     ROS 2 Jazzy -> run 'workstation install-ros2'"
         fi
         if [ -s "$HOME_DIR/.config/opencode/cli.json" ]; then
             echo "  [ok]      opencode cli.json (Tab agent.cycle keybind)"
