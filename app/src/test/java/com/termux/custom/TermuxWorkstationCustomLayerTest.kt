@@ -1053,6 +1053,7 @@ class TermuxWorkstationCustomLayerTest {
         val tempRoot = java.nio.file.Files.createTempDirectory("melcat-rur-v2-test").toFile()
         val serverSocket = java.net.ServerSocket(0, 50, java.net.InetAddress.getByName("127.0.0.1"))
         val running = java.util.concurrent.atomic.AtomicBoolean(true)
+        val capturedLoginPath = java.util.concurrent.atomic.AtomicReference("")
         val capturedLoginBody = java.util.concurrent.atomic.AtomicReference("")
         val capturedCsrfHeader = java.util.concurrent.atomic.AtomicReference("")
         val mockLiveKitJwt = "eyJhbGciOiJIUzI1NiJ9.mock_operator_livekit_jwt_secret.sig"
@@ -1090,7 +1091,8 @@ class TermuxWorkstationCustomLayerTest {
                     val reqBody = String(bodyBuf, 0, read)
 
                     val (extraHeaders, jsonResp) = when (path) {
-                        "/api/login" -> {
+                        "/api/login.php", "/api/login" -> {
+                            capturedLoginPath.set(path)
                             capturedLoginBody.set(reqBody)
                             listOf(
                                 "Set-Cookie: rur_session=sess_abc; Path=/; HttpOnly",
@@ -1154,8 +1156,9 @@ class TermuxWorkstationCustomLayerTest {
             assertTrue(configured.ros2Ready)
             assertEquals("pi-1", configured.linkedPiSshDeviceId)
 
-            // 2. Login against mock PAGE_RUR DB API
+            // 2. Login against mock PAGE_RUR DB API (/api/login.php first matching LoginApp.tsx)
             val loggedIn = manager.loginOperator("23040123", "123456").getOrThrow()
+            assertEquals("/api/login.php", capturedLoginPath.get())
             assertTrue(capturedLoginBody.get().contains("\"matricula\":\"23040123\""))
             assertTrue(capturedLoginBody.get().contains("\"password\":\"123456\""))
             assertTrue(capturedLoginBody.get().contains("\"code\":\"123456\""))
@@ -1175,11 +1178,12 @@ class TermuxWorkstationCustomLayerTest {
             assertFalse("LiveKit token must NOT be written to operator session", sessJsonText.contains(mockLiveKitJwt))
             assertFalse("Operator bearer must NOT leak into rur-ops.json", opsJsonText.contains("jwt-operator-bearer-123"))
 
-            // 4. PTY execve must NEVER expose LIVEKIT_TOKEN on argv[], MUST pass "-c" as arguments[0] (TermuxService prepends executablePath)
+            // 4. PTY execve must NEVER expose LIVEKIT_TOKEN on argv[], MUST pass "-c" as arguments[0], and NEVER drop into Termux /bin/login
             val rxMod = com.termux.custom.rur.RurControlCatalog.byId("livekit_rx_pc")!!
             val (shBin, argv) = manager.buildModulePtyExec(rxMod, loggedIn)
             assertTrue(shBin.endsWith("/bin/sh"))
             assertEquals("-c", argv[0])
+            assertFalse("ROS 2 wrapper must never drop into Termux /bin/login", argv[1].contains("/bin/login"))
             assertFalse("LIVEKIT_TOKEN must NEVER appear in argv[]", argv.any { it.contains(mockLiveKitJwt) })
             assertTrue("Custom editable receiver command should be passed as positional arg", argv.last().contains("use_rviz:=false"))
             val envFileArg = argv.first { it.contains(".cache/melcat-rur/.env.") }
@@ -1191,8 +1195,11 @@ class TermuxWorkstationCustomLayerTest {
 
             val (_, installArgv) = manager.buildInstallRos2PtyExec()
             assertEquals("-c", installArgv[0])
+            assertTrue("Installer must transition directly to Ubuntu ROS 2 shell", installArgv[1].contains("ros2 shell"))
+            assertFalse("Installer must never fall back to Termux /bin/login", installArgv[1].contains("/bin/login"))
             val (_, aiArgv) = manager.buildRos2AiAgentPtyExec("agy", loggedIn)
             assertEquals("-c", aiArgv[0])
+            assertFalse("AI ROS 2 wrapper must never drop into Termux /bin/login", aiArgv[1].contains("/bin/login"))
             manager.cleanupEphemeralEnvFromArgv(aiArgv)
 
             // 5. 2FA generate + enable against PAGE_RUR

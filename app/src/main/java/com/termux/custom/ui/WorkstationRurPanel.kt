@@ -1,7 +1,11 @@
 package com.termux.custom.ui
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -12,14 +16,22 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -27,10 +39,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -41,6 +56,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -50,15 +66,23 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -72,6 +96,615 @@ import com.termux.custom.rur.RurModuleCategory
 import com.termux.custom.rur.RurModuleSpec
 import com.termux.custom.rur.RurStackSpec
 import com.termux.custom.ssh.SshDeviceRecord
+import kotlin.math.roundToInt
+
+// Exact PAGE_RUR (`ing-melcat/page/src/index.css`) & image.png color tokens
+private val RurGateBackground = Color(0xFF020713)      // --background: #020713
+private val RurGatePanelSurface = Color(0xFF0E141F)    // Exact sampled dark slate box from image.png
+private val RurGateInputFill = Color(0xFF080D16)       // Deep inset input box from image.png
+private val RurGateGridLine = Color(0x149CB0C9)        // Crisp technical blueprint grid lines
+private val RurGateBorder = Color(0x26F5F3E9)          // --border: rgba(245, 243, 233, 0.15)
+private val RurGateBone = Color(0xFFF5F3E9)            // --bone: #F5F3E9 (corner crosshairs)
+private val RurGateText = Color(0xFFEBF0F6)            // --text: #EBF0F6
+private val RurGateMuted = Color(0xFF8C9BB0)           // --muted: #8c9bb0
+private val RurGateYellow = Color(0xFFFBCA01)          // --accent: #FBCA01 (Institutional RUR Yellow)
+private val RurGateError = Color(0xFFEF4444)           // --error: #ef4444
+
+// ============================================================================================
+// STAGE 1: FULL-SCREEN "ACCESO AL SISTEMA" LOGIN GATE (Exact match to image.png & LoginApp.tsx)
+// ============================================================================================
+@Composable
+internal fun RurFullScreenSystemAccessGate(
+    state: RurControlState,
+    activeSpace: WorkstationSpace,
+    isAuthBusy: Boolean,
+    authError: String?,
+    onSelectSpace: (WorkstationSpace) -> Unit,
+    onLoginOperator: (matricula: String, credential: String, onSuccessClear: () -> Unit) -> Unit,
+    onClearAuthError: () -> Unit,
+    onOpenConfig: () -> Unit,
+) {
+    val haptics = LocalHapticFeedback.current
+    var matricula by rememberSaveable { mutableStateOf("") }
+    var credential by remember { mutableStateOf("") }
+    val shakeOffset = remember { Animatable(0f) }
+
+    DisposableEffect(Unit) {
+        onDispose { credential = "" }
+    }
+
+    LaunchedEffect(authError) {
+        if (!authError.isNullOrBlank()) {
+            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+            for (delta in listOf(-14f, 14f, -10f, 10f, -5f, 5f, 0f)) {
+                shakeOffset.animateTo(delta, tween(durationMillis = 48))
+            }
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(RurGateBackground)
+            .drawBehind {
+                val stepPx = 32.dp.toPx()
+                var x = 0f
+                while (x <= size.width) {
+                    drawLine(
+                        color = RurGateGridLine,
+                        start = Offset(x, 0f),
+                        end = Offset(x, size.height),
+                        strokeWidth = 1f,
+                    )
+                    x += stepPx
+                }
+                var y = 0f
+                while (y <= size.height) {
+                    drawLine(
+                        color = RurGateGridLine,
+                        start = Offset(0f, y),
+                        end = Offset(size.width, y),
+                        strokeWidth = 1f,
+                    )
+                    y += stepPx
+                }
+            },
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(
+                    WindowInsets.statusBars
+                        .union(WindowInsets.navigationBars)
+                        .union(WindowInsets.displayCutout)
+                )
+                .imePadding(),
+        ) {
+            // Industrial Topbar matching image.png: [Logo + Dev Switcher]  RESEARCH UNIT OF ROBOTICS  [⚙]
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(RurGateBackground),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(54.dp)
+                        .padding(horizontal = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        RurBrandBadge(size = 28.dp)
+                        WorkspaceSpaceSwitcher(
+                            activeSpace = activeSpace,
+                            compact = true,
+                            onSelectSpace = onSelectSpace,
+                        )
+                    }
+
+                    Text(
+                        text = "RESEARCH UNIT OF ROBOTICS",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 3.2.sp,
+                        color = RurGateText,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(horizontal = 8.dp),
+                    )
+
+                    // Square industrial gear icon box (.topbar-icon in index.css)
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .size(32.dp)
+                            .background(RurGatePanelSurface, RoundedCornerShape(2.dp))
+                            .border(1.dp, RurGateBorder, RoundedCornerShape(2.dp))
+                            .clickable {
+                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                onOpenConfig()
+                            },
+                    ) {
+                        Text(
+                            text = "⚙",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 14.sp,
+                            color = RurGateBone,
+                        )
+                    }
+                }
+                HorizontalDivider(thickness = 1.dp, color = RurGateBorder)
+            }
+
+            // Centered "ACCESO AL SISTEMA" industrial box with corner crosshair ticks
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 20.dp, vertical = 16.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .offset { IntOffset(shakeOffset.value.roundToInt(), 0) }
+                        .widthIn(max = 380.dp)
+                        .fillMaxWidth()
+                        .background(RurGatePanelSurface, RoundedCornerShape(2.dp))
+                        .border(1.dp, RurGateBorder, RoundedCornerShape(2.dp))
+                        .drawWithContent {
+                            drawContent()
+                            // Signature Crosshair corners (.login-panel::before & ::after)
+                            val tick = 9.dp.toPx()
+                            val stroke = 1.6.dp.toPx()
+                            // Top-left white/bone corner bracket
+                            drawLine(RurGateBone, Offset(0f, 0f), Offset(tick, 0f), stroke)
+                            drawLine(RurGateBone, Offset(0f, 0f), Offset(0f, tick), stroke)
+                            // Bottom-right muted corner bracket
+                            drawLine(RurGateMuted, Offset(size.width - tick, size.height), Offset(size.width, size.height), stroke)
+                            drawLine(RurGateMuted, Offset(size.width, size.height - tick), Offset(size.width, size.height), stroke)
+                        }
+                        .padding(horizontal = 26.dp, vertical = 28.dp),
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                    ) {
+                        // Header: ACCESO AL SISTEMA + dashed bottom divider
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            Text(
+                                text = "ACCESO AL SISTEMA",
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                letterSpacing = 1.2.sp,
+                                color = RurGateText,
+                            )
+                            Canvas(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(1.dp),
+                            ) {
+                                drawLine(
+                                    color = RurGateBorder,
+                                    start = Offset(0f, 0f),
+                                    end = Offset(size.width, 0f),
+                                    strokeWidth = 1.dp.toPx(),
+                                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f),
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(2.dp))
+
+                        // Input 1: MATRÍCULA
+                        RurIndustrialInputBox(
+                            value = matricula,
+                            onValueChange = {
+                                matricula = it
+                                if (authError != null) onClearAuthError()
+                            },
+                            placeholder = "MATRÍCULA",
+                            isPassword = false,
+                            enabled = !isAuthBusy,
+                            imeAction = ImeAction.Next,
+                            onImeAction = {},
+                        )
+
+                        // Input 2: CÓDIGO DE ACCESO
+                        RurIndustrialInputBox(
+                            value = credential,
+                            onValueChange = {
+                                credential = it
+                                if (authError != null) onClearAuthError()
+                            },
+                            placeholder = "CÓDIGO DE ACCESO",
+                            isPassword = true,
+                            enabled = !isAuthBusy,
+                            imeAction = ImeAction.Done,
+                            onImeAction = {
+                                if (!isAuthBusy && matricula.isNotBlank() && credential.isNotBlank()) {
+                                    onLoginOperator(matricula.trim(), credential.trim()) {
+                                        credential = ""
+                                    }
+                                }
+                            },
+                        )
+
+                        // Submit Button: Solid Institutional RUR Yellow (#FBCA01) "INICIAR SESIÓN"
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(46.dp)
+                                .background(
+                                    color = if (!isAuthBusy && matricula.isNotBlank() && credential.isNotBlank()) {
+                                        RurGateYellow
+                                    } else {
+                                        RurGateYellow.copy(alpha = 0.55f)
+                                    },
+                                    shape = RoundedCornerShape(2.dp),
+                                )
+                                .clickable(
+                                    enabled = !isAuthBusy && matricula.isNotBlank() && credential.isNotBlank(),
+                                ) {
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    onLoginOperator(matricula.trim(), credential.trim()) {
+                                        credential = ""
+                                    }
+                                },
+                        ) {
+                            if (isAuthBusy) {
+                                CircularProgressIndicator(
+                                    color = Color.Black,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            } else {
+                                Text(
+                                    text = "INICIAR SESIÓN",
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 1.6.sp,
+                                    color = Color.Black,
+                                )
+                            }
+                        }
+
+                        if (!authError.isNullOrBlank()) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(RurGateError.copy(alpha = 0.12f), RoundedCornerShape(2.dp))
+                                    .drawBehind {
+                                        drawLine(
+                                            color = RurGateError,
+                                            start = Offset(0f, 0f),
+                                            end = Offset(0f, size.height),
+                                            strokeWidth = 3.dp.toPx(),
+                                        )
+                                    }
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                            ) {
+                                Text(
+                                    text = authError,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp,
+                                    color = RurGateError,
+                                    lineHeight = 15.sp,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RurIndustrialInputBox(
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String,
+    isPassword: Boolean,
+    enabled: Boolean,
+    imeAction: ImeAction,
+    onImeAction: () -> Unit,
+) {
+    BasicTextField(
+        value = value,
+        onValueChange = onValueChange,
+        enabled = enabled,
+        singleLine = true,
+        textStyle = TextStyle(
+            fontFamily = FontFamily.Monospace,
+            fontSize = 12.sp,
+            color = RurGateText,
+            letterSpacing = 1.1.sp,
+        ),
+        cursorBrush = SolidColor(RurGateYellow),
+        visualTransformation = if (isPassword) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
+        keyboardOptions = KeyboardOptions(
+            autoCorrectEnabled = false,
+            keyboardType = if (isPassword) KeyboardType.Password else KeyboardType.Ascii,
+            imeAction = imeAction,
+        ),
+        keyboardActions = KeyboardActions(
+            onNext = { onImeAction() },
+            onDone = { onImeAction() },
+        ),
+        decorationBox = { innerTextField ->
+            Box(
+                contentAlignment = Alignment.CenterStart,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(44.dp)
+                    .background(RurGateInputFill, RoundedCornerShape(2.dp))
+                    .border(
+                        width = 1.dp,
+                        color = if (value.isNotEmpty()) RurGateYellow.copy(alpha = 0.55f) else RurGateBorder,
+                        shape = RoundedCornerShape(2.dp),
+                    )
+                    .padding(horizontal = 14.dp),
+            ) {
+                if (value.isEmpty()) {
+                    Text(
+                        text = placeholder,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        letterSpacing = 1.8.sp,
+                        color = RurGateMuted,
+                        maxLines = 1,
+                    )
+                }
+                innerTextField()
+            }
+        },
+    )
+}
+
+// ============================================================================================
+// STAGE 2: MANDATORY UBUNTU 24.04 + ROS 2 JAZZY PROVISIONING OVERLAY (Before Terminal Unlock)
+// ============================================================================================
+@Composable
+internal fun RurRos2SetupStageOverlay(
+    state: RurControlState,
+    activeSpace: WorkstationSpace,
+    isInstallRunning: Boolean,
+    onSelectSpace: (WorkstationSpace) -> Unit,
+    onStartOrRetryInstall: () -> Unit,
+    onRecheckStatus: () -> Unit,
+    onLogoutOperator: () -> Unit,
+    onOpenConfig: () -> Unit,
+    renderInstallTerminal: @Composable (Modifier) -> Unit,
+) {
+    val operator = state.operatorSession
+    val completedSteps = listOf(
+        state.prootDistroInstalled,
+        state.ubuntuInstalled,
+        state.ros2JazzyInstalled,
+    ).count { it }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(RurGateBackground),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(
+                    WindowInsets.statusBars
+                        .union(WindowInsets.navigationBars)
+                        .union(WindowInsets.displayCutout)
+                ),
+        ) {
+            // Topbar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .padding(horizontal = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                RurBrandBadge(size = 26.dp)
+                WorkspaceSpaceSwitcher(
+                    activeSpace = activeSpace,
+                    compact = true,
+                    onSelectSpace = onSelectSpace,
+                )
+                Text(
+                    text = "PREPARANDO ENTORNO UBUNTU 24.04 + ROS 2 JAZZY",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.4.sp,
+                    color = RurGateYellow,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                if (operator != null) {
+                    Text(
+                        text = operator.displayName,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        color = RurGateMuted,
+                        maxLines = 1,
+                    )
+                }
+                OutlinedButton(
+                    onClick = onLogoutOperator,
+                    border = BorderStroke(1.dp, RurGateBorder),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    modifier = Modifier.height(30.dp),
+                ) {
+                    Text("Salir", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = RurGateMuted)
+                }
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .size(30.dp)
+                        .background(RurGatePanelSurface, RoundedCornerShape(2.dp))
+                        .border(1.dp, RurGateBorder, RoundedCornerShape(2.dp))
+                        .clickable(onClick = onOpenConfig),
+                ) {
+                    Text("⚙", fontFamily = FontFamily.Monospace, fontSize = 13.sp, color = RurGateBone)
+                }
+            }
+            HorizontalDivider(thickness = 1.dp, color = RurGateBorder)
+
+            // Step checklist card (3 mandatory gates before unlocking ROS 2 terminal)
+            Surface(
+                shape = RoundedCornerShape(2.dp),
+                color = RurGatePanelSurface,
+                border = BorderStroke(1.dp, RurGateBorder),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "INSTALACIÓN OBLIGATORIA DEL SECTOR ROS 2 ($completedSteps/3)",
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = RurGateText,
+                            )
+                            Text(
+                                text = "Al finalizar, todas las terminales '+' de este sector entrarán directo a Ubuntu 24.04 + ROS 2 Jazzy.",
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp,
+                                color = RurGateMuted,
+                                lineHeight = 14.sp,
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            if (!isInstallRunning) {
+                                Button(
+                                    onClick = onStartOrRetryInstall,
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = RurGateYellow,
+                                        contentColor = Color.Black,
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(32.dp),
+                                ) {
+                                    Text(
+                                        text = "REINTENTAR INSTALACIÓN",
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                    )
+                                }
+                            }
+                            OutlinedButton(
+                                onClick = onRecheckStatus,
+                                border = BorderStroke(1.dp, RurGateBorder),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                modifier = Modifier.height(32.dp),
+                            ) {
+                                Text("Verificar", fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = RurGateText)
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        RurSetupStepChip("1. Motor proot-distro", state.prootDistroInstalled, isInstallRunning && !state.prootDistroInstalled)
+                        RurSetupStepChip("2. Ubuntu 24.04 ARM64", state.ubuntuInstalled, isInstallRunning && state.prootDistroInstalled && !state.ubuntuInstalled)
+                        RurSetupStepChip("3. ROS 2 Jazzy + Puentes IA", state.ros2JazzyInstalled, isInstallRunning && state.ubuntuInstalled && !state.ros2JazzyInstalled)
+                    }
+                }
+            }
+
+            // Live installer console output (locked strictly to the automated installer)
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 6.dp)
+                    .border(1.dp, RurGateBorder, RoundedCornerShape(2.dp)),
+            ) {
+                renderInstallTerminal(Modifier.fillMaxSize())
+            }
+        }
+    }
+}
+
+@Composable
+private fun RurSetupStepChip(
+    label: String,
+    done: Boolean,
+    inProgress: Boolean,
+) {
+    val borderColor = when {
+        done -> WorkstationColors.AccentEmerald.copy(alpha = 0.6f)
+        inProgress -> RurGateYellow
+        else -> RurGateBorder
+    }
+    val fgColor = when {
+        done -> WorkstationColors.AccentEmerald
+        inProgress -> RurGateYellow
+        else -> RurGateMuted
+    }
+    Surface(
+        shape = RoundedCornerShape(2.dp),
+        color = RurGateInputFill,
+        border = BorderStroke(1.dp, borderColor),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                text = when {
+                    done -> "✓"
+                    inProgress -> "●"
+                    else -> "○"
+                },
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = fgColor,
+            )
+            Text(
+                text = label,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp,
+                color = fgColor,
+                maxLines = 1,
+            )
+        }
+    }
+}
 
 // ============================================================================================
 // RUR ROS 2 CONTROL CENTER PANEL (PAGE_RUR DB Auth + LiveKit offboard_ws Receivers + AI in ROS)
@@ -81,13 +714,8 @@ internal fun RurControlCenterPanel(
     state: RurControlState,
     liveRos2Sessions: List<LivePtyTab>,
     sshDevices: List<SshDeviceRecord>,
-    isAuthBusy: Boolean,
-    authError: String?,
     isSyncBusy: Boolean,
-    onLoginOperator: (matricula: String, credential: String, onSuccessClear: () -> Unit) -> Unit,
-    onClearAuthError: () -> Unit,
     onLogoutOperator: () -> Unit,
-    onSetOfflineBypass: (Boolean) -> Unit,
     onOpen2faSetup: () -> Unit,
     onSyncFleet: () -> Unit,
     onApplyDriftUpdate: () -> Unit,
@@ -137,17 +765,12 @@ internal fun RurControlCenterPanel(
         verticalArrangement = Arrangement.spacedBy(10.dp),
         contentPadding = PaddingValues(bottom = 14.dp),
     ) {
-        // 1. Operador RUR (PAGE_RUR DB Auth — ONLY inside ROS 2 Space)
+        // 1. Operador RUR autenticado (PAGE_RUR DB Auth)
         item(key = "rur_auth_card") {
             RurOperatorAuthCard(
                 state = state,
-                isAuthBusy = isAuthBusy,
-                authError = authError,
                 isSyncBusy = isSyncBusy,
-                onLogin = onLoginOperator,
-                onClearAuthError = onClearAuthError,
                 onLogout = onLogoutOperator,
-                onSetOfflineBypass = onSetOfflineBypass,
                 onOpen2faSetup = onOpen2faSetup,
                 onSyncFleet = onSyncFleet,
                 onApplyDrift = onApplyDriftUpdate,
@@ -183,7 +806,7 @@ internal fun RurControlCenterPanel(
                                 .background(if (state.ros2Ready) WorkstationColors.AccentEmerald else WorkstationColors.AccentAmber),
                         )
                         Text(
-                            text = if (state.ros2Ready) "Ubuntu 24.04 · ROS 2 Jazzy READY" else "Entorno Ubuntu 24.04 + ROS 2 Jazzy",
+                            text = "Ubuntu 24.04 · ROS 2 Jazzy READY",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = WorkstationColors.TextPrimary,
@@ -205,72 +828,43 @@ internal fun RurControlCenterPanel(
                         }
                     }
 
-                    if (!state.ros2Ready) {
-                        Text(
-                            text = "Instalación opcional vía proot-distro: Ubuntu 24.04 + ROS 2 Jazzy + CycloneDDS + SLAM + Nav2 + Foxglove + puentes agy/opencode.",
-                            fontSize = 11.sp,
-                            color = WorkstationColors.TextSecondary,
-                            lineHeight = 15.sp,
-                        )
-                        Button(
+                    Text(
+                        text = "offboard_ws: ${
+                            when {
+                                state.offboardWsBuilt -> "listo (install/setup.bash)"
+                                state.offboardWsPresent -> "presente (pendiente colcon build)"
+                                else -> "no detectado en ~/${state.offboardRepoPath}"
+                            }
+                        }",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        color = WorkstationColors.TextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        OutlinedButton(
                             onClick = {
-                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                onInstallRos2()
+                                RurControlCatalog.byId("ros2_shell")?.let(onLaunchModule)
                             },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = WorkstationColors.AccentEmerald,
-                                contentColor = WorkstationColors.VoidCanvas,
-                            ),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                            modifier = Modifier.fillMaxWidth(),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(32.dp),
                         ) {
-                            Text(
-                                text = "Instalar Ubuntu 24.04 + ROS 2 Jazzy",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                            Text("+ Shell Ubuntu", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                    } else {
-                        Text(
-                            text = "offboard_ws: ${
-                                when {
-                                    state.offboardWsBuilt -> "listo (install/setup.bash)"
-                                    state.offboardWsPresent -> "presente (pendiente colcon build)"
-                                    else -> "no detectado en ~/${state.offboardRepoPath}"
-                                }
-                            }",
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 10.sp,
-                            color = WorkstationColors.TextSecondary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        OutlinedButton(
+                            onClick = onOpenFoxgloveBrowser,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(32.dp),
                         ) {
-                            OutlinedButton(
-                                onClick = {
-                                    RurControlCatalog.byId("ros2_shell")?.let(onLaunchModule)
-                                },
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(32.dp),
-                            ) {
-                                Text("Shell ROS 2", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                            OutlinedButton(
-                                onClick = onOpenFoxgloveBrowser,
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(32.dp),
-                            ) {
-                                Text("Foxglove 3D", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
+                            Text("Foxglove 3D", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
                 }
@@ -636,342 +1230,145 @@ internal fun RurControlCenterPanel(
 @Composable
 private fun RurOperatorAuthCard(
     state: RurControlState,
-    isAuthBusy: Boolean,
-    authError: String?,
     isSyncBusy: Boolean,
-    onLogin: (String, String, () -> Unit) -> Unit,
-    onClearAuthError: () -> Unit,
     onLogout: () -> Unit,
-    onSetOfflineBypass: (Boolean) -> Unit,
     onOpen2faSetup: () -> Unit,
     onSyncFleet: () -> Unit,
     onApplyDrift: () -> Unit,
     onOpenConfig: () -> Unit,
 ) {
-    var matricula by rememberSaveable { mutableStateOf("") }
-    var credential by remember { mutableStateOf("") }
-    val operator = state.operatorSession
-    DisposableEffect(Unit) {
-        onDispose { credential = "" }
-    }
+    val operator = state.operatorSession ?: return
 
     Surface(
         shape = RoundedCornerShape(12.dp),
         color = WorkstationColors.SurfaceElevated,
-        border = BorderStroke(
-            1.dp,
-            if (state.isAuthenticated) WorkstationColors.AccentEmerald.copy(alpha = 0.45f)
-            else WorkstationColors.BorderStrong,
-        ),
+        border = BorderStroke(1.dp, WorkstationColors.AccentEmerald.copy(alpha = 0.45f)),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(
             modifier = Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            if (state.isAuthenticated && operator != null) {
-                // Authenticated Operator Card
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .clip(CircleShape)
-                            .background(WorkstationColors.AccentEmerald),
-                    )
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = operator.displayName,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = WorkstationColors.TextPrimary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            text = "${operator.matricula}${if (operator.grupo.isNotBlank()) " · ${operator.grupo}" else ""}",
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 10.sp,
-                            color = WorkstationColors.TextSecondary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    Surface(
-                        shape = RoundedCornerShape(6.dp),
-                        color = if (operator.canOperate) WorkstationColors.AccentGoldWash else WorkstationColors.SurfaceKeycap,
-                        border = BorderStroke(1.dp, if (operator.canOperate) WorkstationColors.BorderStrong else WorkstationColors.BorderHairline),
-                    ) {
-                        Text(
-                            text = operator.primaryRoleLabel,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = if (operator.canOperate) WorkstationColors.AccentGold else WorkstationColors.TextSecondary,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                        )
-                    }
-                }
-
-                // LiveKit RAM Token + Sync summary
-                Text(
-                    text = "Token RAM: ${if (state.hasLiveRamToken) "ACTIVO (${state.liveTokenSource})" else "local .env"} · Sync: ${if (state.syncStatus.ok) "OK" else state.syncStatus.code}",
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 10.sp,
-                    color = if (state.hasLiveRamToken) WorkstationColors.AccentEmerald else WorkstationColors.TextSecondary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(WorkstationColors.AccentEmerald),
                 )
-
-                if (!operator.totpEnabled || operator.mustChangePassword) {
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = WorkstationColors.AccentAmberWash,
-                        border = BorderStroke(1.dp, WorkstationColors.AccentAmber.copy(alpha = 0.45f)),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Text(
-                                text = "2FA Authenticator pendiente en PAGE_RUR",
-                                fontSize = 10.sp,
-                                color = WorkstationColors.AccentAmber,
-                                modifier = Modifier.weight(1f),
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            TextButton(
-                                onClick = onOpen2faSetup,
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                                modifier = Modifier.height(26.dp),
-                            ) {
-                                Text("Activar 2FA", fontSize = 10.sp, color = WorkstationColors.AccentGold)
-                            }
-                        }
-                    }
-                }
-
-                state.syncStatus.pendingDriftNotice?.let { drift ->
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = WorkstationColors.AccentAmberWash,
-                        border = BorderStroke(1.dp, WorkstationColors.AccentAmber.copy(alpha = 0.5f)),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Text(
-                                text = drift,
-                                fontSize = 10.sp,
-                                color = WorkstationColors.AccentAmber,
-                                modifier = Modifier.weight(1f),
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            TextButton(
-                                onClick = onApplyDrift,
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                                modifier = Modifier.height(26.dp),
-                            ) {
-                                Text("Aplicar", fontSize = 10.sp, color = WorkstationColors.AccentGold)
-                            }
-                        }
-                    }
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    OutlinedButton(
-                        onClick = onSyncFleet,
-                        enabled = !isSyncBusy,
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(32.dp),
-                    ) {
-                        Text(if (isSyncBusy) "Sync…" else "Sync BD", fontSize = 11.sp, maxLines = 1)
-                    }
-                    OutlinedButton(
-                        onClick = onOpenConfig,
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                        modifier = Modifier.height(32.dp),
-                    ) {
-                        Text("⚙", fontSize = 12.sp)
-                    }
-                    OutlinedButton(
-                        onClick = onLogout,
-                        border = BorderStroke(1.dp, WorkstationColors.AccentRose.copy(alpha = 0.5f)),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                        modifier = Modifier.height(32.dp),
-                    ) {
-                        Text("Salir", fontSize = 11.sp, color = WorkstationColors.AccentRose, maxLines = 1)
-                    }
-                }
-            } else if (state.offlineBypassEnabled) {
-                // Collapsed Local/Offline Mode Banner
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Modo Local (.env) · Sin sesión PAGE_RUR",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = WorkstationColors.TextPrimary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            text = if (state.hasDeviceKey) "Device Key 0600 activa (${state.deviceKeyPreview})" else "Usando variables locales del repo",
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 10.sp,
-                            color = WorkstationColors.TextSecondary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    TextButton(
-                        onClick = { onSetOfflineBypass(false) },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                        modifier = Modifier.height(30.dp),
-                    ) {
-                        Text("Login RUR", fontSize = 11.sp, color = WorkstationColors.AccentGold)
-                    }
-                    OutlinedButton(
-                        onClick = onOpenConfig,
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                        modifier = Modifier.height(30.dp),
-                    ) {
-                        Text("⚙", fontSize = 12.sp)
-                    }
-                }
-            } else {
-                // Inline Operator Login paired to PAGE_RUR PostgreSQL `users` table
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Acceso Operador RUR (PAGE_RUR)",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = WorkstationColors.AccentGold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            text = state.webApiUrl.removePrefix("https://").removePrefix("http://"),
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 10.sp,
-                            color = WorkstationColors.TextSecondary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    OutlinedButton(
-                        onClick = onOpenConfig,
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                        modifier = Modifier.height(30.dp),
-                    ) {
-                        Text("⚙", fontSize = 12.sp)
-                    }
-                }
-
-                OutlinedTextField(
-                    value = matricula,
-                    onValueChange = {
-                        matricula = it
-                        if (authError != null) onClearAuthError()
-                    },
-                    label = { Text("Matrícula (BD RUR)", fontSize = 11.sp) },
-                    singleLine = true,
-                    enabled = !isAuthBusy,
-                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp),
-                    keyboardOptions = KeyboardOptions(
-                        autoCorrectEnabled = false,
-                        keyboardType = KeyboardType.Ascii,
-                    ),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = credential,
-                    onValueChange = {
-                        credential = it
-                        if (authError != null) onClearAuthError()
-                    },
-                    label = { Text("Contraseña o código 2FA (6 dígitos)", fontSize = 11.sp) },
-                    singleLine = true,
-                    enabled = !isAuthBusy,
-                    visualTransformation = PasswordVisualTransformation(),
-                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp),
-                    keyboardOptions = KeyboardOptions(
-                        autoCorrectEnabled = false,
-                        keyboardType = KeyboardType.Password,
-                    ),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-
-                if (!authError.isNullOrBlank()) {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = authError,
-                        fontSize = 11.sp,
-                        color = WorkstationColors.AccentRose,
-                        lineHeight = 14.sp,
+                        text = operator.displayName,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = WorkstationColors.TextPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = "${operator.matricula}${if (operator.grupo.isNotBlank()) " · ${operator.grupo}" else ""}",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        color = WorkstationColors.TextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = if (operator.canOperate) WorkstationColors.AccentGoldWash else WorkstationColors.SurfaceKeycap,
+                    border = BorderStroke(1.dp, if (operator.canOperate) WorkstationColors.BorderStrong else WorkstationColors.BorderHairline),
                 ) {
-                    Button(
-                        onClick = {
-                            onLogin(matricula.trim(), credential.trim()) {
-                                credential = ""
-                            }
-                        },
-                        enabled = !isAuthBusy && matricula.isNotBlank() && credential.isNotBlank(),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = WorkstationColors.AccentGold,
-                            contentColor = WorkstationColors.VoidCanvas,
-                        ),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(36.dp),
+                    Text(
+                        text = operator.primaryRoleLabel,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (operator.canOperate) WorkstationColors.AccentGold else WorkstationColors.TextSecondary,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    )
+                }
+            }
+
+            Text(
+                text = "Token RAM: ${if (state.hasLiveRamToken) "ACTIVO (${state.liveTokenSource})" else "local .env"} · Sync: ${if (state.syncStatus.ok) "OK" else state.syncStatus.code}",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp,
+                color = if (state.hasLiveRamToken) WorkstationColors.AccentEmerald else WorkstationColors.TextSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+
+            state.syncStatus.pendingDriftNotice?.let { drift ->
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = WorkstationColors.AccentAmberWash,
+                    border = BorderStroke(1.dp, WorkstationColors.AccentAmber.copy(alpha = 0.5f)),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         Text(
-                            text = if (isAuthBusy) "Verificando…" else "Iniciar sesión RUR",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
+                            text = drift,
+                            fontSize = 10.sp,
+                            color = WorkstationColors.AccentAmber,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                         )
+                        TextButton(
+                            onClick = onApplyDrift,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                            modifier = Modifier.height(26.dp),
+                        ) {
+                            Text("Aplicar", fontSize = 10.sp, color = WorkstationColors.AccentGold)
+                        }
                     }
-                    TextButton(
-                        onClick = { onSetOfflineBypass(true) },
-                        enabled = !isAuthBusy,
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                        modifier = Modifier.height(36.dp),
-                    ) {
-                        Text("Local", fontSize = 11.sp, color = WorkstationColors.TextSecondary)
-                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                OutlinedButton(
+                    onClick = onSyncFleet,
+                    enabled = !isSyncBusy,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(32.dp),
+                ) {
+                    Text(if (isSyncBusy) "Sync…" else "Sync BD", fontSize = 11.sp, maxLines = 1)
+                }
+                OutlinedButton(
+                    onClick = onOpen2faSetup,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    modifier = Modifier.height(32.dp),
+                ) {
+                    Text("2FA", fontSize = 11.sp, maxLines = 1)
+                }
+                OutlinedButton(
+                    onClick = onOpenConfig,
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    modifier = Modifier.height(32.dp),
+                ) {
+                    Text("⚙", fontSize = 12.sp)
+                }
+                OutlinedButton(
+                    onClick = onLogout,
+                    border = BorderStroke(1.dp, WorkstationColors.AccentRose.copy(alpha = 0.5f)),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    modifier = Modifier.height(32.dp),
+                ) {
+                    Text("Salir", fontSize = 11.sp, color = WorkstationColors.AccentRose, maxLines = 1)
                 }
             }
         }

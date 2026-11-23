@@ -479,9 +479,9 @@ class RurControlCenterManager(
     }
 
     /**
-     * Authenticates an operator directly against PAGE_RUR (`POST /api/login`) matching
-     * PostgreSQL `login_system.users` (`matricula`, `password_hash` or 6-digit TOTP `code`).
-     * Captures BOTH JWT `token` AND `Set-Cookie` (`rur_csrf` + session cookie), locks in 0600 vault (12h).
+     * Authenticates an operator directly against PAGE_RUR (`POST /api/login.php` with fallback to `/api/login`)
+     * matching `src/LoginApp.tsx` and PostgreSQL `login_system.users` (`matricula`, `password_hash` / `code`).
+     * Captures the 24h JWT `token` (and any `Set-Cookie` / `rur_csrf`) and locks it in the 0600 vault.
      */
     suspend fun loginOperator(
         rawMatricula: String,
@@ -490,34 +490,35 @@ class RurControlCenterManager(
         val matricula = rawMatricula.trim()
         val credential = rawCredential.trim()
         if (matricula.isEmpty() || credential.isEmpty()) {
-            return@withContext Result.failure(IllegalArgumentException("Ingresa tu matrícula y contraseña (o código 2FA)."))
+            return@withContext Result.failure(IllegalArgumentException("Por favor completa Matrícula y Código de Acceso."))
         }
         if (matricula.length > 64 || credential.length > 256 ||
             matricula.any { it.code < 0x20 || it.code == 0x7F } ||
             credential.any { it.code < 0x20 || it.code == 0x7F }
         ) {
-            return@withContext Result.failure(IllegalArgumentException("Caracteres inválidos en matrícula o credencial."))
+            return@withContext Result.failure(IllegalArgumentException("Caracteres inválidos en Matrícula o Código de Acceso."))
         }
 
         val persisted = synchronized(configLock) { loadPersistedConfig() }
         val baseUrl = validateWebApiUrl(persisted.webApiUrl).getOrElse { return@withContext Result.failure(it) }
-        val loginUrl = "$baseUrl/api/login"
 
         val payload = JSONObject().apply {
             put("matricula", matricula)
             put("password", credential)
             put("code", credential)
         }.toString()
+        val reqHeaders = mapOf(
+            "Content-Type" to "application/json",
+            "Accept" to "application/json",
+            "User-Agent" to USER_AGENT,
+        )
 
-        val httpRes = runCatching {
+        // Match LoginApp.tsx (`/api/login.php`) first, falling back to `/api/login` if 404/405
+        var httpRes = runCatching {
             executeHttpJson(
                 method = "POST",
-                urlStr = loginUrl,
-                headers = mapOf(
-                    "Content-Type" to "application/json",
-                    "Accept" to "application/json",
-                    "User-Agent" to USER_AGENT,
-                ),
+                urlStr = "$baseUrl/api/login.php",
+                headers = reqHeaders,
                 body = payload,
             )
         }.getOrElse { err ->
@@ -525,13 +526,28 @@ class RurControlCenterManager(
                 IllegalStateException("No se pudo conectar con $baseUrl: ${err.message ?: err.javaClass.simpleName}")
             )
         }
+        if (httpRes.statusCode == 404 || httpRes.statusCode == 405) {
+            val fallbackRes = runCatching {
+                executeHttpJson(
+                    method = "POST",
+                    urlStr = "$baseUrl/api/login",
+                    headers = reqHeaders,
+                    body = payload,
+                )
+            }.getOrNull()
+            if (fallbackRes != null) {
+                httpRes = fallbackRes
+            }
+        }
 
         val json = runCatching { JSONObject(httpRes.body) }.getOrNull()
-        if (httpRes.statusCode !in 200..299 || json == null || json.optBoolean("success", true).not()) {
+        val bearerToken = json?.optString("token", "")?.trim().orEmpty()
+        val hasAuth = bearerToken.isNotEmpty() || httpRes.cookieHeader.isNotBlank()
+        if (httpRes.statusCode !in 200..299 || json == null || !json.optBoolean("success", false) || !hasAuth) {
             val serverMsg = json?.optString("message")?.ifBlank { json.optString("error") }.orEmpty()
             return@withContext Result.failure(
                 IllegalStateException(
-                    serverMsg.ifBlank { "Credenciales rechazadas por PAGE_RUR (HTTP ${httpRes.statusCode})." }
+                    serverMsg.ifBlank { "Credenciales incorrectas (HTTP ${httpRes.statusCode})." }
                 )
             )
         }
@@ -540,11 +556,11 @@ class RurControlCenterManager(
         val parsedSession = parseOperatorSessionFromUserJson(
             userJson = userJson,
             fallbackMatricula = matricula,
-            hasSessionAuth = json.optString("token").isNotBlank() || httpRes.cookieHeader.isNotBlank(),
+            hasSessionAuth = true,
         )
         val stored = StoredOperatorAuth(
             session = parsedSession,
-            bearerToken = json.optString("token", "").trim(),
+            bearerToken = bearerToken,
             cookieHeader = httpRes.cookieHeader,
             csrfToken = extractCookieValue(httpRes.cookieHeader, "rur_csrf"),
         )
@@ -552,7 +568,6 @@ class RurControlCenterManager(
             return@withContext Result.failure(IllegalStateException("No se pudo guardar la sesión de operador (0600)."))
         }
 
-        // Disable offline bypass on successful login (re-read under lock to avoid clobbering concurrent edits)
         synchronized(configLock) {
             val latest = loadPersistedConfig()
             if (latest.offlineBypassEnabled) {
@@ -1683,8 +1698,8 @@ class RurControlCenterManager(
     }
 
     companion object {
-        private const val USER_AGENT = "RUR-ControlCenter-Android/2.0"
-        private const val OPERATOR_SESSION_TTL_MS = 12L * 60L * 60L * 1000L // 12 hours (matches PAGE_RUR)
+        private const val USER_AGENT = "RUR-ControlCenter-Android/2.1"
+        private const val OPERATOR_SESSION_TTL_MS = 24L * 60L * 60L * 1000L // 24 hours (matches page/api/server.js jwt.sign expiresIn: '24h')
         private const val MAX_HTTP_BODY_BYTES = 262_144 // 256 KB cap
         private const val MAX_REDIRECTS = 3
         private const val MAX_EDITABLE_CMD_LEN = 512
@@ -1903,30 +1918,26 @@ class RurControlCenterManager(
             return sdf.format(Date(epochMs))
         }
 
-        // Positional-arg safe installer wrapper that keeps shell open so user can inspect output/errors
+        // Positional-arg safe installer wrapper: runs `workstation install-ros2` and immediately enters Ubuntu ROS 2
+        // (NEVER drops the user into a plain Termux shell inside the ROS 2 sector!)
         // Outer argv: $1=workstationBin $2=loginBin $3=bashBin $4=shBin
         private val INSTALL_ROS2_WRAPPER_SCRIPT = """
             WS_BIN="${'$'}1"
-            LOGIN_BIN="${'$'}2"
-            BASH_BIN="${'$'}3"
-            SH_BIN="${'$'}4"
             if [ -x "${'$'}WS_BIN" ]; then
                 "${'$'}WS_BIN" install-ros2
                 RC=${'$'}?
-                printf "\n\033[1;33m==> workstation install-ros2 finalizó (código %s)\033[0m\n" "${'$'}RC"
+                if [ "${'$'}RC" = "0" ]; then
+                    printf "\n\033[1;32m==> Ubuntu 24.04 + ROS 2 Jazzy instalado correctamente. Entrando a Ubuntu ROS 2...\033[0m\n"
+                    exec "${'$'}WS_BIN" ros2 shell
+                fi
+                printf "\n\033[1;31m==> La instalación finalizó con código %s. Toca 'Reintentar Instalación' arriba.\033[0m\n" "${'$'}RC"
             else
                 echo "[RUR] workstation CLI no encontrado en ${'$'}WS_BIN" >&2
             fi
-            if [ -x "${'$'}LOGIN_BIN" ]; then
-                exec "${'$'}LOGIN_BIN"
-            elif [ -x "${'$'}BASH_BIN" ]; then
-                exec "${'$'}BASH_BIN" -l
-            else
-                exec "${'$'}SH_BIN" -i
-            fi
+            while sleep 3600; do :; done
         """.trimIndent()
 
-        // Positional-arg safe proot-distro Ubuntu ROS 2 wrapper (ZERO nested quote interpolation!)
+        // Positional-arg safe proot-distro Ubuntu ROS 2 wrapper (ZERO nested quote interpolation, ZERO fallback to Termux shell!)
         // Outer argv: $1=prootBin $2=homeDir $3=prefixDir $4=workDir $5=envFile $6=isInteractive $7=banner $8=rosCmd
         private val PROOT_ROS2_WRAPPER_SCRIPT = """
             PROOT_BIN="${'$'}1"
@@ -1939,11 +1950,8 @@ class RurControlCenterManager(
             ROS_CMD="${'$'}8"
             if [ ! -x "${'$'}PROOT_BIN" ]; then
                 rm -f "${'$'}ENV_FILE" 2>/dev/null || true
-                echo "========================================================"
-                echo " Ubuntu 24.04 + ROS 2 Jazzy aún no está instalado."
-                echo " Ejecuta 'workstation install-ros2' o toca Instalar en el panel."
-                echo "========================================================"
-                exec "${'$'}PREFIX_DIR/bin/login"
+                echo "[RUR] Ubuntu 24.04 + ROS 2 Jazzy requiere instalación previa."
+                exit 1
             fi
             exec "${'$'}PROOT_BIN" login ubuntu \
                 --bind "${'$'}HOME_DIR:${'$'}HOME_DIR" \
@@ -1984,7 +1992,7 @@ class RurControlCenterManager(
                     fi
                     eval "${'$'}ROS_CMD"
                     STATUS=${'$'}?
-                    printf "\n\033[0;90m[Proceso terminado con código %s — shell ROS 2 lista]\033[0m\n" "${'$'}STATUS"
+                    printf "\n\033[0;90m[Proceso terminado con código %s — shell Ubuntu ROS 2 lista]\033[0m\n" "${'$'}STATUS"
                     exec /bin/bash -i
                 ' _ "${'$'}HOME_DIR" "${'$'}PREFIX_DIR" "${'$'}WORK_DIR" "${'$'}ENV_FILE" "${'$'}IS_INTERACTIVE" "${'$'}BANNER" "${'$'}ROS_CMD"
         """.trimIndent()
@@ -2000,8 +2008,8 @@ class RurControlCenterManager(
             AGENT_BIN="${'$'}6"
             if [ ! -x "${'$'}PROOT_BIN" ]; then
                 rm -f "${'$'}ENV_FILE" 2>/dev/null || true
-                echo "[RUR] Ubuntu ROS 2 no instalado — iniciando ${'$'}AGENT_BIN en Termux nativo..."
-                exec "${'$'}PREFIX_DIR/bin/${'$'}AGENT_BIN"
+                echo "[RUR] Ubuntu 24.04 + ROS 2 Jazzy requiere instalación previa."
+                exit 1
             fi
             exec "${'$'}PROOT_BIN" login ubuntu \
                 --bind "${'$'}HOME_DIR:${'$'}HOME_DIR" \

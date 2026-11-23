@@ -581,7 +581,7 @@ private fun WorkstationRoot(
         }
     }
 
-    fun spawnInstallRos2Session() {
+    fun spawnInstallRos2Session(forceRestartIfExited: Boolean = true) {
         val service = latestTermuxService
         if (!bootstrapReady && !CustomBootstrapProvisioner.isBootstrapInstalled()) {
             onEnsureBootstrap()
@@ -590,6 +590,12 @@ private fun WorkstationRoot(
         }
         if (service == null) {
             notify("TermuxService aún iniciando…", showSnackbar = true)
+            return
+        }
+        val currentRur = latestRurState
+        if (!currentRur.isAuthenticated) {
+            activeSpace = WorkstationSpace.ROS2_CONTROL
+            notify("Inicia sesión en ACCESO AL SISTEMA primero", showSnackbar = true)
             return
         }
         val existingIdx = service.termuxSessions.indexOfFirst {
@@ -601,8 +607,15 @@ private fun WorkstationRoot(
             lastRos2SessionIndex = existingIdx
             primaryTab = PrimaryTab.TERMINAL
             isPortraitSheetOpen = false
-            notify("Instalación ROS 2 Jazzy ya en curso", showSnackbar = true)
             return
+        }
+        if (forceRestartIfExited) {
+            for (i in service.termuxSessions.lastIndex downTo 0) {
+                val ts = service.termuxSessions[i].terminalSession
+                if (ts.mSessionName == "ros:install" && !ts.isRunning) {
+                    runCatching { service.removeTermuxSession(ts) }
+                }
+            }
         }
         val (shBin, argv) = rurControlManager.buildInstallRos2PtyExec()
         val created = runCatching {
@@ -641,6 +654,11 @@ private fun WorkstationRoot(
             return
         }
         val currentRur = latestRurState
+        if (!currentRur.isAuthenticated) {
+            activeSpace = WorkstationSpace.ROS2_CONTROL
+            notify("Inicia sesión en ACCESO AL SISTEMA primero", showSnackbar = true)
+            return
+        }
         if (!currentRur.ros2Ready) {
             spawnInstallRos2Session()
             return
@@ -699,6 +717,15 @@ private fun WorkstationRoot(
             return
         }
         val currentRur = latestRurState
+        if (!currentRur.isAuthenticated) {
+            activeSpace = WorkstationSpace.ROS2_CONTROL
+            notify("Inicia sesión en ACCESO AL SISTEMA primero", showSnackbar = true)
+            return
+        }
+        if (!currentRur.ros2Ready) {
+            spawnInstallRos2Session()
+            return
+        }
         scope.launch {
             val execPair = runCatching {
                 withContext(Dispatchers.IO) { rurControlManager.buildRos2AiAgentPtyExec(agentBinary, currentRur) }
@@ -758,6 +785,11 @@ private fun WorkstationRoot(
             return false
         }
         val currentRur = latestRurState
+        if (!currentRur.isAuthenticated) {
+            activeSpace = WorkstationSpace.ROS2_CONTROL
+            notify("Inicia sesión en ACCESO AL SISTEMA primero", showSnackbar = true)
+            return false
+        }
         if (!currentRur.ros2Ready) {
             spawnInstallRos2Session()
             return false
@@ -845,6 +877,11 @@ private fun WorkstationRoot(
     }
 
     fun spawnRos2Stack(stack: RurStackSpec) {
+        if (!latestRurState.isAuthenticated) {
+            activeSpace = WorkstationSpace.ROS2_CONTROL
+            notify("Inicia sesión en ACCESO AL SISTEMA primero", showSnackbar = true)
+            return
+        }
         if (!latestRurState.ros2Ready) {
             spawnInstallRos2Session()
             return
@@ -921,16 +958,8 @@ private fun WorkstationRoot(
                 val restored = if (lastRos2SessionIndex in rosIndices) lastRos2SessionIndex else rosIndices.first()
                 activeSessionIndex = restored
                 lastRos2SessionIndex = restored
-            } else if (latestRurState.ros2Ready) {
+            } else if (latestRurState.isAuthenticated && latestRurState.ros2Ready) {
                 spawnRos2ShellSession()
-            } else {
-                // Guide user cleanly to Login + 1-tap Ubuntu ROS 2 installer
-                when (formFactor) {
-                    WorkstationFormFactor.PHONE_PORTRAIT,
-                    WorkstationFormFactor.PHONE_LANDSCAPE -> primaryTab = PrimaryTab.ROS_CONTROL
-                    WorkstationFormFactor.TABLET_PORTRAIT -> isPortraitSheetOpen = true
-                    WorkstationFormFactor.TABLET_LANDSCAPE -> isZenMode = false
-                }
             }
             scope.launch { rurState = rurControlManager.inspectState() }
         } else {
@@ -1808,62 +1837,94 @@ private fun WorkstationRoot(
         }
     }
 
+    val onLoginRurOperator: (String, String, () -> Unit) -> Unit = { mat, cred, onSuccessClear ->
+        if (!isRurAuthBusy) {
+            isRurAuthBusy = true
+            rurAuthError = null
+            scope.launch {
+                try {
+                    rurControlManager.loginOperator(mat, cred)
+                        .onSuccess { updated ->
+                            rurState = updated
+                            rurAuthError = null
+                            onSuccessClear()
+                            val op = updated.operatorSession
+                            notify(
+                                "ACCESO AUTORIZADO · ${op?.displayName ?: mat} (${op?.primaryRoleLabel ?: "RUR"})",
+                                showSnackbar = true,
+                            )
+                        }
+                        .onFailure { err ->
+                            rurAuthError = err.message ?: "Error al iniciar sesión en PAGE_RUR"
+                        }
+                } finally {
+                    isRurAuthBusy = false
+                }
+            }
+        }
+    }
+
+    val onLogoutRurOperator: () -> Unit = {
+        if (!isRurAuthBusy) {
+            isRurAuthBusy = true
+            scope.launch {
+                try {
+                    teardownRurNodeSessions("Cierre de sesión RUR")
+                    rurState = rurControlManager.logoutOperator()
+                    rurAuthError = null
+                    notify("Sesión de operador cerrada (0600 purgada)", showSnackbar = true)
+                } finally {
+                    isRurAuthBusy = false
+                }
+            }
+        }
+    }
+
+    // Stage 2 & Stage 3 orchestrator:
+    // - Once authenticated in ROS 2 space, if Ubuntu 24.04 + ROS 2 Jazzy is not installed yet,
+    //   automatically launch `ros:install` and poll `inspectState()` every 2 seconds until ready.
+    // - Once authenticated AND `ros2Ready`, ensure an Ubuntu 24.04 ROS 2 shell is open.
+    LaunchedEffect(activeSpace, rurState.isAuthenticated, rurState.ros2Ready, bootstrapReady, termuxService) {
+        if (activeSpace != WorkstationSpace.ROS2_CONTROL) return@LaunchedEffect
+        val service = termuxService ?: return@LaunchedEffect
+        if (!bootstrapReady && !CustomBootstrapProvisioner.isBootstrapInstalled()) return@LaunchedEffect
+        if (!rurState.isAuthenticated) return@LaunchedEffect
+
+        if (!rurState.ros2Ready) {
+            val installIdx = service.termuxSessions.indexOfFirst {
+                it.terminalSession.mSessionName == "ros:install"
+            }
+            if (installIdx >= 0) {
+                activeSessionIndex = installIdx
+                lastRos2SessionIndex = installIdx
+            } else {
+                spawnInstallRos2Session(forceRestartIfExited = false)
+            }
+            while (isActive && !rurState.ros2Ready) {
+                delay(2_000L)
+                val inspected = rurControlManager.inspectState()
+                rurState = inspected
+                if (inspected.ros2Ready) {
+                    notify("Ubuntu 24.04 + ROS 2 Jazzy instalado · Sector ROS 2 desbloqueado", showSnackbar = true)
+                }
+            }
+        } else {
+            val hasAnyRosSession = service.termuxSessions.any {
+                RurControlCenterManager.isRos2SessionTitle(it.terminalSession.mSessionName)
+            }
+            if (!hasAnyRosSession) {
+                spawnRos2ShellSession()
+            }
+        }
+    }
+
     val renderRurPanel: @Composable () -> Unit = {
         RurControlCenterPanel(
             state = rurState,
             liveRos2Sessions = ros2Sessions,
             sshDevices = sshPanelState.devices,
-            isAuthBusy = isRurAuthBusy,
-            authError = rurAuthError,
             isSyncBusy = isRurSyncBusy,
-            onLoginOperator = { mat, cred, onSuccessClear ->
-                if (!isRurAuthBusy) {
-                    isRurAuthBusy = true
-                    rurAuthError = null
-                    scope.launch {
-                        try {
-                            rurControlManager.loginOperator(mat, cred)
-                                .onSuccess { updated ->
-                                    rurState = updated
-                                    rurAuthError = null
-                                    onSuccessClear()
-                                    val op = updated.operatorSession
-                                    notify(
-                                        "Sesión RUR activa: ${op?.displayName ?: mat} (${op?.primaryRoleLabel ?: "OK"})",
-                                        showSnackbar = true,
-                                    )
-                                }
-                                .onFailure { err ->
-                                    rurAuthError = err.message ?: "Error al iniciar sesión en PAGE_RUR"
-                                }
-                        } finally {
-                            isRurAuthBusy = false
-                        }
-                    }
-                }
-            },
-            onClearAuthError = { rurAuthError = null },
-            onLogoutOperator = {
-                if (!isRurAuthBusy) {
-                    isRurAuthBusy = true
-                    scope.launch {
-                        try {
-                            teardownRurNodeSessions("Cierre de sesión RUR")
-                            rurState = rurControlManager.logoutOperator()
-                            rurAuthError = null
-                            notify("Sesión de operador cerrada (0600 purgada)", showSnackbar = true)
-                        } finally {
-                            isRurAuthBusy = false
-                        }
-                    }
-                }
-            },
-            onSetOfflineBypass = { enabled ->
-                scope.launch {
-                    rurState = rurControlManager.setOfflineBypass(enabled)
-                    rurAuthError = null
-                }
-            },
+            onLogoutOperator = onLogoutRurOperator,
             onOpen2faSetup = {
                 rur2faError = null
                 rur2faPayload = null
@@ -1932,7 +1993,7 @@ private fun WorkstationRoot(
                 rurConfigError = null
                 isRurConfigDialogOpen = true
             },
-            onInstallRos2 = { spawnInstallRos2Session() },
+            onInstallRos2 = { spawnInstallRos2Session(forceRestartIfExited = true) },
             onOpenFoxgloveBrowser = {
                 val url = "https://app.foxglove.dev/?ds=foxglove-websocket&ds.url=ws%3A%2F%2F127.0.0.1%3A8765"
                 runCatching {
@@ -1984,136 +2045,182 @@ private fun WorkstationRoot(
         }
     }
 
-    // Root container — Obsidian canvas + dismissable OTA banner + SnackbarHost
+    // Root container — Obsidian canvas + 3-stage ROS 2 Gate + dismissable OTA banner + SnackbarHost
     Surface(
         color = WorkstationColors.VoidCanvas,
         modifier = Modifier.fillMaxSize(),
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
-            when (formFactor) {
-                WorkstationFormFactor.PHONE_PORTRAIT -> {
-                    PhonePortraitLayout(
-                        activeSpace = activeSpace,
-                        refreshHz = refreshHzInt,
-                        liveSessions = visibleSessions,
-                        activeSessionIndex = activeSessionIndex,
-                        primaryTab = primaryTab,
-                        isImeVisible = isImeVisible,
-                        hasHardwareKeyboard = hasHardwareKeyboard,
-                        surfaceBridge = surfaceBridge,
-                        shieldScore = shieldScore,
-                        tokenPresent = tokenState.isPresent,
-                        freeStorage = storageMetrics.freeFormatted,
-                        statusNotice = statusNotice,
-                        onSelectSpace = { selectSpace(it) },
-                        onSelectSession = { activeSessionIndex = it },
-                        onAddSession = { addSessionForActiveSpace() },
-                        onCloseSession = { closePtySession(it) },
-                        onOpenTutorial = { isTutorialOpen = true },
-                        onSelectTab = { selectPrimaryTab(it) },
-                        onOpenCommandPalette = { isCommandPaletteOpen = true },
-                        onOpenClassicTermux = openClassicTermux,
-                        onQuickCommand = onQuickCommandForActiveSpace,
-                        renderInspector = renderInspectorContent,
-                        renderRurPanel = renderRurPanel,
-                    )
+            if (activeSpace == WorkstationSpace.ROS2_CONTROL && !rurState.isAuthenticated) {
+                // STAGE 1: Full-screen industrial RUR Login Gate (ACCESO AL SISTEMA)
+                RurFullScreenSystemAccessGate(
+                    state = rurState,
+                    activeSpace = activeSpace,
+                    isAuthBusy = isRurAuthBusy,
+                    authError = rurAuthError,
+                    onSelectSpace = { selectSpace(it) },
+                    onLoginOperator = onLoginRurOperator,
+                    onClearAuthError = { rurAuthError = null },
+                    onOpenConfig = {
+                        rurConfigError = null
+                        isRurConfigDialogOpen = true
+                    },
+                )
+            } else if (activeSpace == WorkstationSpace.ROS2_CONTROL && !rurState.ros2Ready) {
+                // STAGE 2: Mandatory Ubuntu 24.04 + ROS 2 Jazzy installation before unlocking ROS 2 terminal
+                val isInstallRunning = remember(ros2Sessions) {
+                    ros2Sessions.any { it.title == "ros:install" && it.isRunning }
                 }
+                RurRos2SetupStageOverlay(
+                    state = rurState,
+                    activeSpace = activeSpace,
+                    isInstallRunning = isInstallRunning,
+                    onSelectSpace = { selectSpace(it) },
+                    onStartOrRetryInstall = { spawnInstallRos2Session(forceRestartIfExited = true) },
+                    onRecheckStatus = {
+                        scope.launch {
+                            rurState = rurControlManager.inspectState()
+                        }
+                    },
+                    onLogoutOperator = onLogoutRurOperator,
+                    onOpenConfig = {
+                        rurConfigError = null
+                        isRurConfigDialogOpen = true
+                    },
+                    renderInstallTerminal = { mod ->
+                        TerminalCanvasHost(
+                            surfaceBridge = surfaceBridge,
+                            visible = true,
+                            modifier = mod,
+                        )
+                    },
+                )
+            } else {
+                when (formFactor) {
+                    WorkstationFormFactor.PHONE_PORTRAIT -> {
+                        PhonePortraitLayout(
+                            activeSpace = activeSpace,
+                            refreshHz = refreshHzInt,
+                            liveSessions = visibleSessions,
+                            activeSessionIndex = activeSessionIndex,
+                            primaryTab = primaryTab,
+                            isImeVisible = isImeVisible,
+                            hasHardwareKeyboard = hasHardwareKeyboard,
+                            surfaceBridge = surfaceBridge,
+                            shieldScore = shieldScore,
+                            tokenPresent = tokenState.isPresent,
+                            freeStorage = storageMetrics.freeFormatted,
+                            statusNotice = statusNotice,
+                            onSelectSpace = { selectSpace(it) },
+                            onSelectSession = { activeSessionIndex = it },
+                            onAddSession = { addSessionForActiveSpace() },
+                            onCloseSession = { closePtySession(it) },
+                            onOpenTutorial = { isTutorialOpen = true },
+                            onSelectTab = { selectPrimaryTab(it) },
+                            onOpenCommandPalette = { isCommandPaletteOpen = true },
+                            onOpenClassicTermux = openClassicTermux,
+                            onQuickCommand = onQuickCommandForActiveSpace,
+                            renderInspector = renderInspectorContent,
+                            renderRurPanel = renderRurPanel,
+                        )
+                    }
 
-                WorkstationFormFactor.PHONE_LANDSCAPE -> {
-                    PhoneLandscapeLayout(
-                        activeSpace = activeSpace,
-                        refreshHz = refreshHzInt,
-                        liveSessions = visibleSessions,
-                        activeSessionIndex = activeSessionIndex,
-                        primaryTab = primaryTab,
-                        hasHardwareKeyboard = hasHardwareKeyboard,
-                        surfaceBridge = surfaceBridge,
-                        onSelectSpace = { selectSpace(it) },
-                        onSelectSession = { activeSessionIndex = it },
-                        onAddSession = { addSessionForActiveSpace() },
-                        onCloseSession = { closePtySession(it) },
-                        onOpenTutorial = { isTutorialOpen = true },
-                        onSelectTab = { selectPrimaryTab(it) },
-                        onOpenCommandPalette = { isCommandPaletteOpen = true },
-                        onOpenClassicTermux = openClassicTermux,
-                        onQuickCommand = onQuickCommandForActiveSpace,
-                        renderInspector = renderInspectorContent,
-                        renderRurPanel = renderRurPanel,
-                    )
-                }
+                    WorkstationFormFactor.PHONE_LANDSCAPE -> {
+                        PhoneLandscapeLayout(
+                            activeSpace = activeSpace,
+                            refreshHz = refreshHzInt,
+                            liveSessions = visibleSessions,
+                            activeSessionIndex = activeSessionIndex,
+                            primaryTab = primaryTab,
+                            hasHardwareKeyboard = hasHardwareKeyboard,
+                            surfaceBridge = surfaceBridge,
+                            onSelectSpace = { selectSpace(it) },
+                            onSelectSession = { activeSessionIndex = it },
+                            onAddSession = { addSessionForActiveSpace() },
+                            onCloseSession = { closePtySession(it) },
+                            onOpenTutorial = { isTutorialOpen = true },
+                            onSelectTab = { selectPrimaryTab(it) },
+                            onOpenCommandPalette = { isCommandPaletteOpen = true },
+                            onOpenClassicTermux = openClassicTermux,
+                            onQuickCommand = onQuickCommandForActiveSpace,
+                            renderInspector = renderInspectorContent,
+                            renderRurPanel = renderRurPanel,
+                        )
+                    }
 
-                WorkstationFormFactor.TABLET_PORTRAIT -> {
-                    TabletPortraitLayout(
-                        activeSpace = activeSpace,
-                        refreshHz = refreshHzInt,
-                        hasHardwareKeyboard = hasHardwareKeyboard,
-                        liveSessions = visibleSessions,
-                        activeSessionIndex = activeSessionIndex,
-                        inspectorTab = inspectorTab,
-                        ros2InspectorShowSsh = ros2InspectorShowSsh,
-                        isSheetOpen = isPortraitSheetOpen,
-                        surfaceBridge = surfaceBridge,
-                        crdtSiteId = crdtDatabase.siteId,
-                        tokenState = tokenState,
-                        guardianStatus = guardianStatus,
-                        storageMetrics = storageMetrics,
-                        statusNotice = statusNotice,
-                        onSelectSpace = { selectSpace(it) },
-                        onSelectSession = { activeSessionIndex = it },
-                        onAddSession = { addSessionForActiveSpace() },
-                        onCloseSession = { closePtySession(it) },
-                        onOpenTutorial = { isTutorialOpen = true },
-                        onToggleSheet = { isPortraitSheetOpen = !isPortraitSheetOpen },
-                        onSelectInspectorTab = { inspectorTab = it },
-                        onSelectRos2InspectorShowSsh = { ros2InspectorShowSsh = it },
-                        onOpenCommandPalette = { isCommandPaletteOpen = true },
-                        onOpenClassicTermux = openClassicTermux,
-                        onQuickCommand = onQuickCommandForActiveSpace,
-                        renderInspector = renderInspectorContent,
-                        renderRurPanel = renderRurPanel,
-                    )
-                }
+                    WorkstationFormFactor.TABLET_PORTRAIT -> {
+                        TabletPortraitLayout(
+                            activeSpace = activeSpace,
+                            refreshHz = refreshHzInt,
+                            hasHardwareKeyboard = hasHardwareKeyboard,
+                            liveSessions = visibleSessions,
+                            activeSessionIndex = activeSessionIndex,
+                            inspectorTab = inspectorTab,
+                            ros2InspectorShowSsh = ros2InspectorShowSsh,
+                            isSheetOpen = isPortraitSheetOpen,
+                            surfaceBridge = surfaceBridge,
+                            crdtSiteId = crdtDatabase.siteId,
+                            tokenState = tokenState,
+                            guardianStatus = guardianStatus,
+                            storageMetrics = storageMetrics,
+                            statusNotice = statusNotice,
+                            onSelectSpace = { selectSpace(it) },
+                            onSelectSession = { activeSessionIndex = it },
+                            onAddSession = { addSessionForActiveSpace() },
+                            onCloseSession = { closePtySession(it) },
+                            onOpenTutorial = { isTutorialOpen = true },
+                            onToggleSheet = { isPortraitSheetOpen = !isPortraitSheetOpen },
+                            onSelectInspectorTab = { inspectorTab = it },
+                            onSelectRos2InspectorShowSsh = { ros2InspectorShowSsh = it },
+                            onOpenCommandPalette = { isCommandPaletteOpen = true },
+                            onOpenClassicTermux = openClassicTermux,
+                            onQuickCommand = onQuickCommandForActiveSpace,
+                            renderInspector = renderInspectorContent,
+                            renderRurPanel = renderRurPanel,
+                        )
+                    }
 
-                WorkstationFormFactor.TABLET_LANDSCAPE -> {
-                    TabletLandscapeLayout(
-                        activeSpace = activeSpace,
-                        refreshHz = refreshHzInt,
-                        hasHardwareKeyboard = hasHardwareKeyboard,
-                        liveSessions = visibleSessions,
-                        activeSessionIndex = activeSessionIndex,
-                        inspectorTab = inspectorTab,
-                        ros2InspectorShowSsh = ros2InspectorShowSsh,
-                        isZenMode = isZenMode,
-                        surfaceBridge = surfaceBridge,
-                        crdtSiteId = crdtDatabase.siteId,
-                        tokenState = tokenState,
-                        guardianStatus = guardianStatus,
-                        storageMetrics = storageMetrics,
-                        statusNotice = statusNotice,
-                        onSelectSpace = { selectSpace(it) },
-                        onSelectSession = { activeSessionIndex = it },
-                        onAddSession = { addSessionForActiveSpace() },
-                        onCloseSession = { closePtySession(it) },
-                        onOpenTutorial = { isTutorialOpen = true },
-                        onSelectInspectorTab = {
-                            inspectorTab = it
-                            isZenMode = false
-                        },
-                        onSelectRos2InspectorShowSsh = {
-                            ros2InspectorShowSsh = it
-                            isZenMode = false
-                        },
-                        onToggleZenMode = {
-                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                            isZenMode = !isZenMode
-                            notify(if (isZenMode) "Zen Mode · Ctrl+Shift+B" else "Split-Pane Restored")
-                        },
-                        onOpenCommandPalette = { isCommandPaletteOpen = true },
-                        onOpenClassicTermux = openClassicTermux,
-                        onQuickCommand = onQuickCommandForActiveSpace,
-                        renderInspector = renderInspectorContent,
-                        renderRurPanel = renderRurPanel,
-                    )
+                    WorkstationFormFactor.TABLET_LANDSCAPE -> {
+                        TabletLandscapeLayout(
+                            activeSpace = activeSpace,
+                            refreshHz = refreshHzInt,
+                            hasHardwareKeyboard = hasHardwareKeyboard,
+                            liveSessions = visibleSessions,
+                            activeSessionIndex = activeSessionIndex,
+                            inspectorTab = inspectorTab,
+                            ros2InspectorShowSsh = ros2InspectorShowSsh,
+                            isZenMode = isZenMode,
+                            surfaceBridge = surfaceBridge,
+                            crdtSiteId = crdtDatabase.siteId,
+                            tokenState = tokenState,
+                            guardianStatus = guardianStatus,
+                            storageMetrics = storageMetrics,
+                            statusNotice = statusNotice,
+                            onSelectSpace = { selectSpace(it) },
+                            onSelectSession = { activeSessionIndex = it },
+                            onAddSession = { addSessionForActiveSpace() },
+                            onCloseSession = { closePtySession(it) },
+                            onOpenTutorial = { isTutorialOpen = true },
+                            onSelectInspectorTab = {
+                                inspectorTab = it
+                                isZenMode = false
+                            },
+                            onSelectRos2InspectorShowSsh = {
+                                ros2InspectorShowSsh = it
+                                isZenMode = false
+                            },
+                            onToggleZenMode = {
+                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                isZenMode = !isZenMode
+                                notify(if (isZenMode) "Zen Mode · Ctrl+Shift+B" else "Split-Pane Restored")
+                            },
+                            onOpenCommandPalette = { isCommandPaletteOpen = true },
+                            onOpenClassicTermux = openClassicTermux,
+                            onQuickCommand = onQuickCommandForActiveSpace,
+                            renderInspector = renderInspectorContent,
+                            renderRurPanel = renderRurPanel,
+                        )
+                    }
                 }
             }
 
