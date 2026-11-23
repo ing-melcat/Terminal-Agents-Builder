@@ -2,6 +2,8 @@ package com.termux.custom.updater
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -21,6 +23,11 @@ import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
+
+data class ConflictingAddonInfo(
+    val packageName: String,
+    val label: String,
+)
 
 data class ReleaseInfo(
     val tagName: String,
@@ -261,6 +268,30 @@ class GitHubReleaseUpdater(
         runCatching { context.startActivity(intent) }
     }
 
+    /**
+     * Detects installed Termux add-on apps sharing `sharedUserId="com.termux"` (such as Termux:API
+     * or Termux:X11 from F-Droid/GitHub) that are signed with a DIFFERENT certificate from this
+     * app and would cause Android PackageInstaller "conflicto con un paquete" errors.
+     */
+    suspend fun detectConflictingTermuxAddons(): List<ConflictingAddonInfo> = withContext(ioDispatcher) {
+        detectConflictingTermuxAddons(appContext)
+    }
+
+    fun openAddonUninstall(context: Context, packageName: String): Boolean {
+        if (packageName !in KNOWN_TERMUX_ADDONS.keys) return false
+        val deleteIntent = Intent(Intent.ACTION_DELETE, Uri.parse("package:$packageName")).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        if (runCatching { context.startActivity(deleteIntent) }.isSuccess) return true
+        val detailsIntent = Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.parse("package:$packageName"),
+        ).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        return runCatching { context.startActivity(detailsIntent) }.isSuccess
+    }
+
     private fun openConnectionFollowingRedirects(
         rawUrl: String,
         bearerToken: String?,
@@ -270,14 +301,20 @@ class GitHubReleaseUpdater(
         var redirects = 0
         while (redirects < 6) {
             val parsed = URL(currentUrl)
-            val isGitHubHost = parsed.host.endsWith("github.com") || parsed.host.endsWith("githubusercontent.com")
+            val host = parsed.host.lowercase()
+            val isHttpsGitHubHost = parsed.protocol.equals("https", ignoreCase = true) && (
+                host == "github.com" ||
+                    host.endsWith(".github.com") ||
+                    host == "githubusercontent.com" ||
+                    host.endsWith(".githubusercontent.com")
+                )
             val conn = (parsed.openConnection() as HttpURLConnection).apply {
                 connectTimeout = 10_000
                 readTimeout = 25_000
                 instanceFollowRedirects = false
                 setRequestProperty("User-Agent", "Terminal-Agents-Builder/$currentTag")
                 setRequestProperty("Accept", acceptHeader)
-                if (!bearerToken.isNullOrBlank() && isGitHubHost) {
+                if (!bearerToken.isNullOrBlank() && isHttpsGitHubHost) {
                     setRequestProperty("Authorization", "Bearer $bearerToken")
                 }
             }
@@ -320,6 +357,74 @@ class GitHubReleaseUpdater(
         const val RELEASES_WEB_URL = "https://github.com/$REPO_OWNER/$REPO_NAME/releases"
         const val LATEST_RELEASE_API_URL =
             "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest"
+
+        val KNOWN_TERMUX_ADDONS: Map<String, String> = linkedMapOf(
+            "com.termux.api" to "Termux:API",
+            "com.termux.x11" to "Termux:X11",
+            "com.termux.styling" to "Termux:Styling",
+            "com.termux.boot" to "Termux:Boot",
+            "com.termux.widget" to "Termux:Widget",
+            "com.termux.float" to "Termux:Float",
+            "com.termux.tasker" to "Termux:Tasker",
+            "com.termux.gui" to "Termux:GUI",
+        )
+
+        fun detectConflictingTermuxAddons(context: Context): List<ConflictingAddonInfo> {
+            val pm = context.packageManager
+            val ownInfo = getPackageInfoWithSignatures(pm, context.packageName)
+            val ownSharedUserId = ownInfo?.sharedUserId?.takeIf { it.isNotBlank() } ?: "com.termux"
+            val ownSigs = ownInfo?.let { extractActiveCertSha256Set(it) }.orEmpty()
+            val conflicts = mutableListOf<ConflictingAddonInfo>()
+            for ((pkg, defaultLabel) in KNOWN_TERMUX_ADDONS) {
+                val info = getPackageInfoWithSignatures(pm, pkg) ?: continue
+                // Only add-ons declaring the same sharedUserId can cause Android PackageInstaller conflicts
+                if (info.sharedUserId != ownSharedUserId) continue
+                val pmMatch = runCatching {
+                    pm.checkSignatures(context.packageName, pkg) == PackageManager.SIGNATURE_MATCH
+                }.getOrDefault(false)
+                if (pmMatch) continue
+                val addonSigs = extractActiveCertSha256Set(info)
+                if (ownSigs.isEmpty() || addonSigs.isEmpty() || ownSigs != addonSigs) {
+                    val label = runCatching {
+                        info.applicationInfo?.loadLabel(pm)?.toString()?.takeIf { it.isNotBlank() }
+                    }.getOrNull() ?: defaultLabel
+                    conflicts.add(ConflictingAddonInfo(packageName = pkg, label = label))
+                }
+            }
+            return conflicts
+        }
+
+        @Suppress("DEPRECATION")
+        private fun getPackageInfoWithSignatures(pm: PackageManager, pkg: String): PackageInfo? =
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    pm.getPackageInfo(pkg, PackageManager.GET_SIGNING_CERTIFICATES)
+                } else {
+                    pm.getPackageInfo(pkg, PackageManager.GET_SIGNATURES)
+                }
+            }.getOrNull()
+
+        @Suppress("DEPRECATION")
+        private fun extractActiveCertSha256Set(info: PackageInfo): Set<String> {
+            val certs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                val si = info.signingInfo
+                when {
+                    si == null -> info.signatures?.toList().orEmpty()
+                    !si.apkContentsSigners.isNullOrEmpty() -> si.apkContentsSigners.toList()
+                    else -> listOfNotNull(si.signingCertificateHistory?.lastOrNull())
+                }
+            } else {
+                info.signatures?.toList().orEmpty()
+            }
+            if (certs.isEmpty()) return emptySet()
+            return runCatching {
+                val digest = MessageDigest.getInstance("SHA-256")
+                certs.mapTo(LinkedHashSet()) { sig ->
+                    digest.reset()
+                    digest.digest(sig.toByteArray()).joinToString("") { "%02x".format(it) }
+                }
+            }.getOrDefault(emptySet())
+        }
 
         fun parseLatestReleaseJson(
             jsonText: String,

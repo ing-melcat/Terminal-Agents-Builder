@@ -30,6 +30,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -43,6 +44,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -58,6 +61,7 @@ import com.termux.custom.agents.CodingModelCatalog
 import com.termux.custom.agents.CodingModelPreset
 import com.termux.custom.agents.CodingProvider
 import com.termux.custom.security.OAuthTokenState
+import com.termux.custom.skills.SkillRepoInfo
 
 // ============================================================================================
 // DIALOGS: SEARCHABLE COMMAND PALETTE, CODING MODELS VAULT & SECURE OAUTH DIALOG
@@ -98,7 +102,7 @@ internal fun SearchableCommandPaletteDialog(
             PaletteAction("agy", "Launch official Google Antigravity CLI (native arm64)", "", "antigravity cli agent", { latestExec("agy") }),
             PaletteAction("opencode", "Launch native Bionic OpenCode v2 coding agent", "", "opencode code coder qwen devstral", { latestExec("opencode") }),
             PaletteAction("Dispositivos SSH & Tailscale", "Connect to online LAN & Tailscale devices with 1 tap", "", "ssh tailscale lan remote jetson pi devices", { latestOpenSsh() }),
-            PaletteAction("Coding Models & Vault (0600)", "Select code-only models (Free / Eco / Pro / Ollama) & API keys", "", "models openrouter mistral ollama qwen coder codestral codex", { latestOpenCoding() }),
+            PaletteAction("Coding Models & Vault (0600)", "Select code-only models (Free / DeepSeek / Claude / OpenAI / Ollama)", "", "models openrouter mistral deepseek claude anthropic openai ollama qwen coder codestral codex", { latestOpenCoding() }),
             PaletteAction("workstation install-ssh", "Install native Termux OpenSSH client (ssh, ssh-keygen)", "", "ssh openssh install tailscale keygen", { latestExec("workstation install-ssh") }),
             PaletteAction("workstation skills update", "Pull latest skills repos safely (rebase + autostash, keeps AI edits)", "", "skills git pull update sync repo", { latestExec("workstation skills update") }),
             PaletteAction("workstation skills diff", "Inspect local skill improvements made by agy / opencode / claude", "", "skills diff changes git status", { latestExec("workstation skills diff") }),
@@ -150,6 +154,10 @@ internal fun SearchableCommandPaletteDialog(
                     onValueChange = { query = it },
                     placeholder = { Text("Search commands, agents, actions…", fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        autoCorrectEnabled = false,
+                        keyboardType = KeyboardType.Ascii,
+                    ),
                     modifier = Modifier.fillMaxWidth(),
                 )
 
@@ -551,7 +559,7 @@ internal fun CodingModelsVaultDialog(
     errorText: String?,
     onDismiss: () -> Unit,
     onSelectModel: (CodingModelPreset) -> Unit,
-    onSaveApiKey: (CodingProvider, String) -> Unit,
+    onSaveApiKey: (CodingProvider, String, onSaved: () -> Unit) -> Unit,
     onClearApiKey: (CodingProvider) -> Unit,
     onSaveOllamaUrl: (String) -> Unit,
     onClearOllamaUrl: () -> Unit,
@@ -733,8 +741,9 @@ internal fun CodingModelsVaultDialog(
                                             ) {
                                                 Button(
                                                     onClick = {
-                                                        onSaveApiKey(selectedProvider, apiKeyInput)
-                                                        apiKeyInput = ""
+                                                        onSaveApiKey(selectedProvider, apiKeyInput) {
+                                                            apiKeyInput = ""
+                                                        }
                                                     },
                                                     enabled = apiKeyInput.trim().length >= 8,
                                                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
@@ -775,6 +784,10 @@ internal fun CodingModelsVaultDialog(
                                                     )
                                                 },
                                                 singleLine = true,
+                                                keyboardOptions = KeyboardOptions(
+                                                    autoCorrectEnabled = false,
+                                                    keyboardType = KeyboardType.Uri,
+                                                ),
                                                 modifier = Modifier.fillMaxWidth(),
                                             )
                                             Row(
@@ -1069,3 +1082,348 @@ internal fun AddSkillRepoDialog(
         },
     )
 }
+
+@Composable
+internal fun SkillMarkdownEditorDialog(
+    skillName: String,
+    skillInfo: SkillRepoInfo?,
+    content: String,
+    isLoading: Boolean,
+    isLoadFailed: Boolean,
+    isSaving: Boolean,
+    hasUnsavedChanges: Boolean,
+    errorText: String?,
+    onContentChange: (String) -> Unit,
+    onSave: () -> Unit,
+    onOpenDiff: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var pendingDiscardAction by remember { mutableStateOf<String?>(null) } // "dismiss" or "diff"
+    val byteCount = remember(content) { utf8ByteLength(content) }
+    val isOverLimit = byteCount > 131_072
+    val sizeLabel = remember(byteCount) {
+        if (byteCount < 1024) {
+            "$byteCount B / 128 KB"
+        } else {
+            String.format(java.util.Locale.US, "%.1f / 128 KB", byteCount / 1024.0)
+        }
+    }
+    val statusBadgeText = when {
+        hasUnsavedChanges -> "SIN GUARDAR"
+        skillInfo?.hasLocalEdits == true -> "EDITADO"
+        !skillInfo?.branch.isNullOrBlank() -> skillInfo!!.branch!!
+        skillInfo?.isGitRepo == true -> "GIT"
+        else -> "LOCAL"
+    }
+    val statusBadgeColor = when {
+        hasUnsavedChanges || skillInfo?.hasLocalEdits == true -> WorkstationColors.AccentAmber
+        skillInfo?.isGitRepo == true -> WorkstationColors.AccentEmerald
+        else -> WorkstationColors.AccentGold
+    }
+    val statusBadgeBg = when {
+        hasUnsavedChanges || skillInfo?.hasLocalEdits == true -> WorkstationColors.AccentAmberWash
+        skillInfo?.isGitRepo == true -> WorkstationColors.AccentEmeraldWash
+        else -> WorkstationColors.SurfaceKeycap
+    }
+
+    fun requestCloseOrDiff(action: String) {
+        if (isSaving) return
+        if (hasUnsavedChanges && !isLoadFailed) {
+            pendingDiscardAction = action
+        } else if (action == "diff") {
+            onOpenDiff()
+        } else {
+            onDismiss()
+        }
+    }
+
+    Dialog(
+        onDismissRequest = { requestCloseOrDiff("dismiss") },
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false,
+            dismissOnClickOutside = !isSaving && !hasUnsavedChanges,
+        ),
+    ) {
+        androidx.compose.foundation.layout.BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .imePadding()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            val isCompactHeight = maxHeight < 380.dp
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = WorkstationColors.SurfaceElevated,
+                border = BorderStroke(1.dp, WorkstationColors.BorderStrong),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 680.dp)
+                    .heightIn(max = 680.dp),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .padding(if (isCompactHeight) 10.dp else 14.dp)
+                        .then(if (isCompactHeight) Modifier.verticalScroll(rememberScrollState()) else Modifier),
+                    verticalArrangement = Arrangement.spacedBy(if (isCompactHeight) 8.dp else 10.dp),
+                ) {
+                    // Header
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "SKILL.md · $skillName",
+                                fontSize = if (isCompactHeight) 14.sp else 15.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = WorkstationColors.TextPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = "~/.gemini/config/skills/$skillName/SKILL.md",
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp,
+                                color = WorkstationColors.TextMuted,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = statusBadgeBg,
+                        ) {
+                            Text(
+                                text = statusBadgeText,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = statusBadgeColor,
+                                maxLines = 1,
+                                softWrap = false,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                            )
+                        }
+                    }
+
+                    when {
+                        isLoading -> {
+                            Text(
+                                text = "Cargando SKILL.md…",
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 12.sp,
+                                color = WorkstationColors.AccentCyan,
+                                modifier = Modifier.padding(vertical = 24.dp),
+                            )
+                        }
+                        isLoadFailed -> {
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = WorkstationColors.SurfaceKeycap,
+                                border = BorderStroke(1.dp, WorkstationColors.AccentRose.copy(alpha = 0.5f)),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text(
+                                    text = errorText ?: "No se pudo cargar SKILL.md de forma segura. Edítalo desde la terminal para evitar sobrescrituras.",
+                                    fontSize = 12.sp,
+                                    color = WorkstationColors.AccentRose,
+                                    modifier = Modifier.padding(12.dp),
+                                )
+                            }
+                        }
+                        else -> {
+                            val editorModifier = if (isCompactHeight) {
+                                Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 96.dp, max = 180.dp)
+                            } else {
+                                Modifier
+                                    .fillMaxWidth()
+                                    .weight(1f, fill = false)
+                                    .heightIn(min = 180.dp, max = 440.dp)
+                            }
+
+                            OutlinedTextField(
+                                value = content,
+                                onValueChange = {
+                                    pendingDiscardAction = null
+                                    onContentChange(it)
+                                },
+                                enabled = !isSaving,
+                                isError = isOverLimit || !errorText.isNullOrBlank(),
+                                textStyle = TextStyle(
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 12.sp,
+                                    lineHeight = 17.sp,
+                                    color = WorkstationColors.TextPrimary,
+                                ),
+                                placeholder = {
+                                    Text(
+                                        text = "---\nname: $skillName\ndescription: ...\n---\n",
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 11.sp,
+                                        color = WorkstationColors.TextMuted,
+                                    )
+                                },
+                                singleLine = false,
+                                minLines = if (isCompactHeight) 4 else 10,
+                                keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
+                                modifier = editorModifier,
+                            )
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = "Compartido por agy · opencode · claude",
+                                    fontSize = 10.sp,
+                                    color = WorkstationColors.TextSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Text(
+                                    text = sizeLabel,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 10.sp,
+                                    color = if (isOverLimit) WorkstationColors.AccentRose else WorkstationColors.TextMuted,
+                                    maxLines = 1,
+                                )
+                            }
+                        }
+                    }
+
+                    if (!isLoadFailed && isOverLimit) {
+                        Text(
+                            text = "Excede el límite de 128 KB para edición segura en la app.",
+                            fontSize = 11.sp,
+                            color = WorkstationColors.AccentRose,
+                        )
+                    } else if (!isLoadFailed && !errorText.isNullOrBlank()) {
+                        Text(
+                            text = errorText,
+                            fontSize = 11.sp,
+                            color = WorkstationColors.AccentRose,
+                        )
+                    }
+
+                    if (pendingDiscardAction != null) {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = WorkstationColors.AccentAmberWash,
+                            border = BorderStroke(1.dp, WorkstationColors.AccentAmber.copy(alpha = 0.55f)),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Text(
+                                    text = "Tienes cambios sin guardar. ¿Descartarlos?",
+                                    fontSize = 11.sp,
+                                    color = WorkstationColors.AccentAmber,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                TextButton(
+                                    onClick = { pendingDiscardAction = null },
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                                ) {
+                                    Text("Seguir", fontSize = 11.sp, color = WorkstationColors.TextPrimary)
+                                }
+                                TextButton(
+                                    onClick = {
+                                        val action = pendingDiscardAction
+                                        pendingDiscardAction = null
+                                        if (action == "diff") onOpenDiff() else onDismiss()
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                                ) {
+                                    Text("Descartar", fontSize = 11.sp, color = WorkstationColors.AccentRose, fontWeight = FontWeight.SemiBold)
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(thickness = 1.dp, color = WorkstationColors.BorderHairline)
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        OutlinedButton(
+                            onClick = { requestCloseOrDiff("diff") },
+                            enabled = !isLoading && !isSaving,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                            border = BorderStroke(1.dp, WorkstationColors.BorderHairline),
+                        ) {
+                            Text("Diff", fontSize = 11.sp, maxLines = 1, softWrap = false)
+                        }
+                        Spacer(modifier = Modifier.weight(1f))
+                        TextButton(
+                            onClick = { requestCloseOrDiff("dismiss") },
+                            enabled = !isSaving,
+                        ) {
+                            Text("Cancelar", fontSize = 12.sp, color = WorkstationColors.TextSecondary, maxLines = 1)
+                        }
+                        Button(
+                            onClick = onSave,
+                            enabled = !isLoading && !isLoadFailed && !isSaving && !isOverLimit,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = WorkstationColors.AccentGold,
+                                contentColor = WorkstationColors.VoidCanvas,
+                            ),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                        ) {
+                            Text(
+                                text = if (isSaving) "Guardando…" else "Guardar",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun utf8ByteLength(text: CharSequence): Int {
+    var count = 0
+    var i = 0
+    val len = text.length
+    while (i < len) {
+        val ch = text[i]
+        when {
+            ch.code < 0x80 -> {
+                count += 1
+                i += 1
+            }
+            ch.code < 0x800 -> {
+                count += 2
+                i += 1
+            }
+            Character.isHighSurrogate(ch) && i + 1 < len && Character.isLowSurrogate(text[i + 1]) -> {
+                count += 4
+                i += 2
+            }
+            else -> {
+                count += 3
+                i += 1
+            }
+        }
+    }
+    return count
+}
+

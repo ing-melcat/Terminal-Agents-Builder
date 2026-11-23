@@ -87,6 +87,7 @@ internal fun SshDevicesPanel(
     onCopyPublicKey: () -> Unit,
     onGenerateSshKey: () -> Unit,
     onConnectDevice: (SshDeviceRecord) -> Unit,
+    onPushPublicKey: (SshDeviceRecord) -> Unit,
     onRequestAddDevice: () -> Unit,
     onRequestEditDevice: (SshDeviceRecord) -> Unit,
     onRequestDeleteDevice: (SshDeviceRecord) -> Unit,
@@ -390,7 +391,9 @@ internal fun SshDevicesPanel(
                     probe = state.probes[device.id],
                     isScanning = state.isScanning,
                     opensshInstalled = state.opensshInstalled,
+                    hasPublicKey = state.defaultPublicKey != null || device.identityFile.isNotBlank(),
                     onConnect = { onConnectDevice(device) },
+                    onPushKey = { onPushPublicKey(device) },
                     onEdit = { onRequestEditDevice(device) },
                     onDelete = { onRequestDeleteDevice(device) },
                 )
@@ -438,7 +441,9 @@ private fun SshDeviceCard(
     probe: SshDeviceProbe?,
     isScanning: Boolean,
     opensshInstalled: Boolean,
+    hasPublicKey: Boolean,
     onConnect: () -> Unit,
+    onPushKey: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -563,24 +568,33 @@ private fun SshDeviceCard(
                 }
             }
 
-            if (device.tags.isNotBlank() || device.identityFile.isNotBlank()) {
+            if (device.tags.isNotBlank() || device.identityFile.isNotBlank() || device.localPortForwards.isNotBlank() || device.startupCommand.isNotBlank()) {
                 val meta = buildString {
                     if (device.tags.isNotBlank()) append(device.tags)
                     if (device.identityFile.isNotBlank()) {
                         if (isNotEmpty()) append(" · ")
                         append("key: ${device.identityFile}")
                     }
+                    if (device.localPortForwards.isNotBlank()) {
+                        if (isNotEmpty()) append(" · ")
+                        append("-L ${device.localPortForwards}")
+                    }
+                    if (device.startupCommand.isNotBlank()) {
+                        if (isNotEmpty()) append(" · ")
+                        append("cmd: ${device.startupCommand}")
+                    }
                 }
                 Text(
                     text = meta,
+                    fontFamily = FontFamily.Monospace,
                     fontSize = 10.sp,
                     color = WorkstationColors.TextMuted,
-                    maxLines = 1,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
 
-            // Row 3: Connect + Edit/Save + Delete
+            // Row 3: Primary Connect + 1-tap ssh-copy-id (Key ->)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -619,12 +633,36 @@ private fun SshDeviceCard(
                     }
                 }
 
+                if (opensshInstalled) {
+                    OutlinedButton(
+                        onClick = onPushKey,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                        border = BorderStroke(1.dp, WorkstationColors.BorderHairline),
+                    ) {
+                        Text(
+                            text = if (hasPublicKey) "Enviar Key" else "Key →",
+                            fontSize = 10.sp,
+                            color = WorkstationColors.AccentCyan,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+
+            // Row 4: Secondary compact Edit/Save + Delete
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 TextButton(
                     onClick = onEdit,
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                 ) {
                     Text(
-                        text = if (device.source == SshDeviceSource.SSH_CONFIG) "Guardar" else "Editar",
+                        text = if (device.source == SshDeviceSource.SSH_CONFIG) "Guardar perfil" else "Editar",
                         fontSize = 11.sp,
                         color = WorkstationColors.TextSecondary,
                         maxLines = 1,
@@ -635,7 +673,7 @@ private fun SshDeviceCard(
                 if (device.source == SshDeviceSource.SAVED) {
                     TextButton(
                         onClick = onDelete,
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                     ) {
                         Text(
                             text = "Borrar",
@@ -697,6 +735,7 @@ internal fun DeleteSshDeviceConfirmDialog(
 @Composable
 internal fun AddEditSshDeviceDialog(
     initial: SshDeviceRecord?,
+    isSaving: Boolean = false,
     onDismiss: () -> Unit,
     onSave: (
         name: String,
@@ -706,6 +745,8 @@ internal fun AddEditSshDeviceDialog(
         transport: SshTransport,
         identity: String,
         tags: String,
+        localPortForwards: String,
+        startupCommand: String,
         onError: (String) -> Unit,
     ) -> Unit,
 ) {
@@ -724,11 +765,12 @@ internal fun AddEditSshDeviceDialog(
             if (initial?.source == SshDeviceSource.SSH_CONFIG) "" else initial?.tags ?: ""
         )
     }
+    var localPortForwards by rememberSaveable(formKey) { mutableStateOf(initial?.localPortForwards ?: "") }
+    var startupCommand by rememberSaveable(formKey) { mutableStateOf(initial?.startupCommand ?: "") }
     var errorText by rememberSaveable(formKey) { mutableStateOf<String?>(null) }
 
     val selectedTransport = SshTransport.entries.firstOrNull { it.name == transportName }
         ?: SshTransport.DIRECT
-    val isCompactHeight = LocalConfiguration.current.screenHeightDp < 480
 
     val titleText = if (initial != null && initial.source == SshDeviceSource.SAVED) {
         "Editar dispositivo SSH"
@@ -743,6 +785,7 @@ internal fun AddEditSshDeviceDialog(
                 name = it.take(48)
                 errorText = null
             },
+            enabled = !isSaving,
             label = { Text("Nombre (ej. Jetson Orin, PC Lab)", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
@@ -764,6 +807,7 @@ internal fun AddEditSshDeviceDialog(
                     val selected = t == selectedTransport
                     FilterChip(
                         selected = selected,
+                        enabled = !isSaving,
                         onClick = {
                             transportName = t.name
                             userTouchedTransport = true
@@ -783,7 +827,7 @@ internal fun AddEditSshDeviceDialog(
                             labelColor = WorkstationColors.TextSecondary,
                         ),
                         border = FilterChipDefaults.filterChipBorder(
-                            enabled = true,
+                            enabled = !isSaving,
                             selected = selected,
                             borderColor = WorkstationColors.BorderHairline,
                             selectedBorderColor = WorkstationColors.BorderStrong,
@@ -806,6 +850,7 @@ internal fun AddEditSshDeviceDialog(
                     }
                 }
             },
+            enabled = !isSaving,
             label = {
                 Text(
                     if (selectedTransport == SshTransport.TAILSCALE) {
@@ -819,6 +864,7 @@ internal fun AddEditSshDeviceDialog(
                 )
             },
             singleLine = true,
+            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Uri),
             modifier = Modifier.fillMaxWidth(),
         )
 
@@ -832,8 +878,10 @@ internal fun AddEditSshDeviceDialog(
                     username = it.trim().take(64)
                     errorText = null
                 },
+                enabled = !isSaving,
                 label = { Text("Usuario (ej. ubuntu)", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 singleLine = true,
+                keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Ascii),
                 modifier = Modifier.weight(1f),
             )
             OutlinedTextField(
@@ -842,6 +890,7 @@ internal fun AddEditSshDeviceDialog(
                     portText = it.filter { ch -> ch.isDigit() }.take(5)
                     errorText = null
                 },
+                enabled = !isSaving,
                 label = { Text("Puerto", fontSize = 11.sp, maxLines = 1, softWrap = false) },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -855,14 +904,43 @@ internal fun AddEditSshDeviceDialog(
                 identityFile = it.trim().take(64)
                 errorText = null
             },
+            enabled = !isSaving,
             label = { Text("Clave en ~/.ssh/ (opcional, ej. id_ed25519)", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             singleLine = true,
+            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Ascii),
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        OutlinedTextField(
+            value = localPortForwards,
+            onValueChange = {
+                localPortForwards = it.take(120)
+                errorText = null
+            },
+            enabled = !isSaving,
+            label = { Text("Túneles locales -L (ej. 11434:11434, 8888:8888)", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Ascii),
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        OutlinedTextField(
+            value = startupCommand,
+            onValueChange = {
+                startupCommand = it.take(160)
+                errorText = null
+            },
+            enabled = !isSaving,
+            label = { Text("Comando al conectar (ej. tmux attach || tmux new)", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Ascii),
             modifier = Modifier.fillMaxWidth(),
         )
 
         OutlinedTextField(
             value = tags,
             onValueChange = { tags = it.take(64) },
+            enabled = !isSaving,
             label = { Text("Nota / Rol (opcional, ej. ROS2 · Lab)", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
@@ -883,7 +961,7 @@ internal fun AddEditSshDeviceDialog(
             horizontalArrangement = Arrangement.End,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextButton(onClick = onDismiss) {
+            TextButton(onClick = onDismiss, enabled = !isSaving) {
                 Text("Cancelar", fontSize = 12.sp, color = WorkstationColors.TextSecondary)
             }
             Spacer(modifier = Modifier.width(6.dp))
@@ -901,6 +979,8 @@ internal fun AddEditSshDeviceDialog(
                             selectedTransport,
                             identityFile,
                             tags,
+                            localPortForwards,
+                            startupCommand,
                         ) { err -> errorText = err }
                     }
                 },
@@ -908,24 +988,25 @@ internal fun AddEditSshDeviceDialog(
                     containerColor = WorkstationColors.AccentGold,
                     contentColor = WorkstationColors.VoidCanvas,
                 ),
-                enabled = name.isNotBlank() && host.isNotBlank(),
+                enabled = !isSaving && name.isNotBlank() && host.isNotBlank(),
             ) {
-                Text("Guardar", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Text(if (isSaving) "Guardando…" else "Guardar", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             }
         }
     }
 
     Dialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!isSaving) onDismiss() },
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
-        Box(
+        androidx.compose.foundation.layout.BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
                 .windowInsetsPadding(WindowInsets.safeDrawing)
-                .padding(horizontal = if (isCompactHeight) 8.dp else 12.dp, vertical = if (isCompactHeight) 6.dp else 10.dp),
+                .padding(horizontal = 10.dp, vertical = 8.dp),
             contentAlignment = Alignment.Center,
         ) {
+            val isCompactHeight = maxHeight < 380.dp
             Surface(
                 shape = RoundedCornerShape(16.dp),
                 color = WorkstationColors.SurfaceElevated,
@@ -936,7 +1017,7 @@ internal fun AddEditSshDeviceDialog(
                     .heightIn(max = 620.dp),
             ) {
                 if (isCompactHeight) {
-                    // Phone landscape under IME: unified single verticalScroll so inputs NEVER collapse to 0dp
+                    // Tight post-IME / Split-Screen / Landscape height: unified scroll prevents 0dp input collapse
                     Column(
                         modifier = Modifier
                             .padding(10.dp)

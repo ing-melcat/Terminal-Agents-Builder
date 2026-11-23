@@ -1,13 +1,18 @@
 package com.termux.custom.skills
 
+import android.system.Os
+import android.system.OsConstants
 import com.termux.shared.termux.TermuxConstants
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileOutputStream
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -37,6 +42,7 @@ data class SkillsSummaryState(
 
 /**
  * Inspects unified global skills in ~/.gemini/config/skills/ (symlinked to agy, opencode, and claude),
+ * reads/edits SKILL.md safely with atomic writes and symlink-escape protection,
  * validates Git skill repository URLs and directory names strictly against option/command injection,
  * and builds zero-interpolation OS execve argv[] invocations for `workstation skills ...` in an
  * isolated local PTY tab so active SSH / TUI agent sessions are never disturbed.
@@ -46,6 +52,7 @@ class SkillsRepoManager(
     private val homeDir: File = File(TermuxConstants.TERMUX_HOME_DIR_PATH),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
+    private val writeMutex = Mutex()
     private val skillsDir: File get() = File(homeDir, ".gemini/config/skills")
 
     suspend fun inspectSkills(): SkillsSummaryState = withContext(ioDispatcher) {
@@ -91,6 +98,181 @@ class SkillsRepoManager(
             skills = entries,
         )
     }
+
+    /**
+     * Reads ~/.gemini/config/skills/<skillName>/SKILL.md safely (rejecting path traversal,
+     * live or dangling symlink escapes outside skillsDir, and oversized files > 128 KB with
+     * a bounded O_NOFOLLOW read). Returns a clean YAML frontmatter template when SKILL.md
+     * does not exist yet inside that skill folder.
+     */
+    suspend fun readSkillMarkdown(skillName: String): Result<String> = withContext(ioDispatcher) {
+        runCatching {
+            val cleanName = validateSkillName(skillName).getOrThrow()
+            val skillMd = resolveSafeSkillMdFile(cleanName, createParentIfMissing = false)
+            if (!skillMd.exists()) {
+                return@runCatching defaultSkillTemplate(cleanName)
+            }
+            require(skillMd.isFile) { "SKILL.md no es un archivo regular" }
+            val rawBytes = readBoundedNoFollow(skillMd, MAX_SKILL_MD_BYTES.toInt())
+            rawBytes.toString(Charsets.UTF_8)
+        }.onFailure { err ->
+            if (err is CancellationException) throw err
+        }
+    }
+
+    /**
+     * Atomically writes ~/.gemini/config/skills/<skillName>/SKILL.md using O_EXCL + O_NOFOLLOW
+     * temp creation, fsync, and Os.rename after verifying fail-closed symlink containment so
+     * edits immediately reflect in agy/opencode/claude and Git `diff`/`push`.
+     */
+    suspend fun saveSkillMarkdown(skillName: String, rawContent: String): Result<Unit> =
+        withContext(ioDispatcher) {
+            writeMutex.withLock {
+                runCatching {
+                    val cleanName = validateSkillName(skillName).getOrThrow()
+                    val normalized = rawContent.replace("\r\n", "\n")
+                    val bytes = normalized.toByteArray(Charsets.UTF_8)
+                    require(bytes.size <= MAX_SKILL_MD_BYTES) {
+                        "El contenido excede el límite máximo de 128 KB"
+                    }
+                    val skillMd = resolveSafeSkillMdFile(cleanName, createParentIfMissing = true)
+                    val parent = skillMd.parentFile ?: error("Directorio de skill inválido")
+                    val tmp = File(parent, ".SKILL.md.tmp.${System.nanoTime()}")
+                    try {
+                        val wroteWithOs = runCatching {
+                            val fd = Os.open(
+                                tmp.absolutePath,
+                                OsConstants.O_WRONLY or OsConstants.O_CREAT or OsConstants.O_EXCL or OsConstants.O_NOFOLLOW,
+                                420, // 0644
+                            )
+                            check(fd != null && fd.valid()) { "Os.open unavailable" }
+                            try {
+                                FileOutputStream(fd).use { out ->
+                                    out.write(bytes)
+                                    out.fd.sync()
+                                }
+                            } finally {
+                                runCatching { Os.close(fd) }
+                            }
+                            check(tmp.isFile && tmp.length() == bytes.size.toLong()) { "Os.open write incomplete" }
+                            Os.rename(tmp.absolutePath, skillMd.absolutePath)
+                            !tmp.exists() && skillMd.isFile && skillMd.length() == bytes.size.toLong()
+                        }.getOrDefault(false)
+
+                        if (!wroteWithOs) {
+                            FileOutputStream(tmp).use { out ->
+                                out.write(bytes)
+                                out.fd.sync()
+                            }
+                            if (!tmp.renameTo(skillMd)) {
+                                // Unconditionally unlink target (even if dangling symlink) before fallback copy
+                                runCatching { Os.remove(skillMd.absolutePath) }
+                                skillMd.delete()
+                                tmp.copyTo(skillMd, overwrite = true)
+                                tmp.delete()
+                            }
+                        }
+                    } finally {
+                        if (tmp.exists()) runCatching { tmp.delete() }
+                    }
+                }.onFailure { err ->
+                    if (err is CancellationException) throw err
+                }
+            }
+        }
+
+    private fun readBoundedNoFollow(file: File, maxBytes: Int): ByteArray {
+        val osRead = runCatching {
+            val fd = Os.open(file.absolutePath, OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW, 0)
+            check(fd != null && fd.valid()) { "Os.open unavailable" }
+            try {
+                java.io.FileInputStream(fd).use { input ->
+                    readStreamBounded(input, maxBytes)
+                }
+            } finally {
+                runCatching { Os.close(fd) }
+            }
+        }
+        if (osRead.isSuccess) return osRead.getOrThrow()
+        val cause = osRead.exceptionOrNull()
+        if (cause is IllegalArgumentException) throw cause
+        if (cause is android.system.ErrnoException && cause.errno == OsConstants.ELOOP) {
+            throw IllegalArgumentException("No se permite leer un SKILL.md enlazado simbólicamente")
+        }
+        // Fallback for JVM/Robolectric where Os.open may be stubbed
+        require(!isSymlinkFailClosed(file)) { "No se permite leer un SKILL.md enlazado simbólicamente" }
+        return java.io.FileInputStream(file).use { input -> readStreamBounded(input, maxBytes) }
+    }
+
+    private fun readStreamBounded(input: java.io.InputStream, maxBytes: Int): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        val buf = ByteArray(8192)
+        var total = 0
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            total += n
+            require(total <= maxBytes) {
+                "SKILL.md excede el límite de 128 KB para edición en la app"
+            }
+            out.write(buf, 0, n)
+        }
+        return out.toByteArray()
+    }
+
+    private fun isSymlinkFailClosed(file: File): Boolean = try {
+        val st = Os.lstat(file.absolutePath)
+        if (st != null && st.st_mode != 0) {
+            OsConstants.S_ISLNK(st.st_mode)
+        } else {
+            runCatching { java.nio.file.Files.isSymbolicLink(file.toPath()) }.getOrDefault(false)
+        }
+    } catch (e: android.system.ErrnoException) {
+        e.errno != OsConstants.ENOENT
+    } catch (_: Throwable) {
+        runCatching { java.nio.file.Files.isSymbolicLink(file.toPath()) }.getOrDefault(true)
+    }
+
+    private fun resolveSafeSkillMdFile(cleanName: String, createParentIfMissing: Boolean): File {
+        if (!skillsDir.exists() && createParentIfMissing) {
+            skillsDir.mkdirs()
+        }
+        val canonicalRoot = skillsDir.canonicalFile
+        val targetDir = File(skillsDir, cleanName)
+        // Check symlink unconditionally BEFORE exists() so dangling symlinks are always rejected
+        require(!isSymlinkFailClosed(targetDir)) {
+            "No se permiten enlaces simbólicos en carpetas de skills"
+        }
+        if (targetDir.exists()) {
+            require(targetDir.isDirectory) { "La ruta de la skill no es un directorio" }
+        } else if (createParentIfMissing) {
+            targetDir.mkdirs()
+        }
+        val canonicalDir = targetDir.canonicalFile
+        require(canonicalDir.parentFile == canonicalRoot) {
+            "Ruta fuera de ~/.gemini/config/skills"
+        }
+        val skillMd = File(canonicalDir, "SKILL.md")
+        // Unconditional check catches both live and dangling symlinks at SKILL.md
+        require(!isSymlinkFailClosed(skillMd)) {
+            "No se permite editar un SKILL.md enlazado simbólicamente"
+        }
+        if (skillMd.exists()) {
+            require(skillMd.canonicalFile.parentFile == canonicalDir) {
+                "SKILL.md fuera de la carpeta de la skill"
+            }
+        }
+        return skillMd
+    }
+
+    private fun defaultSkillTemplate(skillName: String): String =
+        """
+        ---
+        name: $skillName
+        description: Custom workstation skill shared by agy, opencode, and claude
+        ---
+        # $skillName
+        """.trimIndent() + "\n"
 
     /**
      * Builds a 100% static zero-interpolation `$PREFIX/bin/sh` execve invocation that runs
@@ -244,6 +426,7 @@ class SkillsRepoManager(
     }
 
     companion object {
+        private const val MAX_SKILL_MD_BYTES = 131_072L
         private val ALLOWED_SUBCOMMANDS = setOf("list", "init", "add", "update", "diff", "push")
 
         // Strict encrypted-remote allowlist aligned 1-to-1 with bootstrap-custom.sh:

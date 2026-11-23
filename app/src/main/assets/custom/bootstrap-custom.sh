@@ -6,7 +6,7 @@ set -eu
 
 PREFIX="/data/data/com.termux/files/usr"
 HOME_DIR="/data/data/com.termux/files/home"
-STAMP_FILE="$HOME_DIR/.config/melcat/.bootstrap_provisioned_v11"
+STAMP_FILE="$HOME_DIR/.config/melcat/.bootstrap_provisioned_v12"
 
 export PATH="$PREFIX/bin:$PATH"
 export HOME="$HOME_DIR"
@@ -775,7 +775,7 @@ print_help() {
     fi
     echo " Skills Dir : $SKILLS_DIR ($(ls -1 "$SKILLS_DIR" 2>/dev/null | tr '\n' ' '))"
     if TF="$(find_active_token 2>/dev/null)"; then
-        echo " OAuth Vault: ACTIVE ($TF, mode 0$(stat -c '%a' "$TF" 2>/dev/null || echo '600'))"
+        echo " OAuth Vault: ACTIVE ($TF, mode $(file_mode_str "$TF"))"
     else
         echo " OAuth Vault: NOT SET (run 'agy' to sign in with Google)"
     fi
@@ -794,6 +794,15 @@ print_help() {
     echo "   workstation ui [ssh|agents] -> Bring 120Hz Workstation UI (or panel) to front"
     echo "   melcat-gc                   -> Clean caches & create zstd backups"
     echo "============================================================"
+}
+
+file_mode_str() {
+    M="$(stat -c '%a' "$1" 2>/dev/null || echo '')"
+    case "$M" in
+        [0-7][0-7][0-7]) printf '0%s' "$M" ;;
+        [0-7][0-7][0-7][0-7]) printf '%s' "$M" ;;
+        *) printf 'unknown' ;;
+    esac
 }
 
 case "${1:-ui}" in
@@ -832,15 +841,14 @@ case "${1:-ui}" in
         ;;
     token|--token)
         if TF="$(find_active_token 2>/dev/null)"; then
-            MODE="$(stat -c '%a' "$TF" 2>/dev/null || echo '600')"
-            echo "[workstation] Antigravity OAuth ACTIVE at $TF (mode: 0$MODE)"
+            echo "[workstation] Antigravity OAuth ACTIVE at $TF (mode: $(file_mode_str "$TF"))"
         else
             echo "[workstation] Antigravity OAuth NOT set. Run 'agy' to sign in with Google."
         fi
-        for prov in openrouter mistral; do
+        for prov in openrouter mistral deepseek anthropic openai; do
             KF="$VAULT_DIR/$prov.key"
             if [ -s "$KF" ]; then
-                echo "[workstation] Coding Vault ($prov): ACTIVE (mode: 0$(stat -c '%a' "$KF" 2>/dev/null || echo '600'))"
+                echo "[workstation] Coding Vault ($prov): ACTIVE (mode: $(file_mode_str "$KF"))"
             fi
         done
         if [ -s "$VAULT_DIR/ollama.url" ]; then
@@ -894,14 +902,14 @@ case "${1:-ui}" in
         done
         echo "  skills : $(ls -1 "$SKILLS_DIR" 2>/dev/null | wc -l | tr -d ' ') in $SKILLS_DIR"
         if TF="$(find_active_token 2>/dev/null)"; then
-            echo "  [ok]      Antigravity OAuth ($TF, mode 0$(stat -c '%a' "$TF" 2>/dev/null || echo '600'))"
+            echo "  [ok]      Antigravity OAuth ($TF, mode $(file_mode_str "$TF"))"
         else
             echo "  [warn]    Antigravity not signed in -> run 'agy'"
         fi
-        for prov in openrouter mistral; do
+        for prov in openrouter mistral deepseek anthropic openai; do
             KF="$VAULT_DIR/$prov.key"
             if [ -s "$KF" ]; then
-                echo "  [ok]      Coding Vault $prov (mode 0$(stat -c '%a' "$KF" 2>/dev/null || echo '600'))"
+                echo "  [ok]      Coding Vault $prov (mode $(file_mode_str "$KF"))"
             fi
         done
         if [ -s "$VAULT_DIR/ollama.url" ]; then

@@ -78,6 +78,7 @@ import com.termux.custom.ssh.SshDevicesManager
 import com.termux.custom.ssh.SshPanelState
 import com.termux.custom.storage.StorageMetrics
 import com.termux.custom.storage.StorageOptimizer
+import com.termux.custom.updater.ConflictingAddonInfo
 import com.termux.custom.updater.GitHubReleaseUpdater
 import com.termux.custom.updater.UpdateState
 import com.termux.shared.termux.TermuxConstants
@@ -398,11 +399,22 @@ private fun WorkstationRoot(
     }
     var skillsState by remember { mutableStateOf(SkillsSummaryState()) }
     var skillsRefreshJob by remember { mutableStateOf<Job?>(null) }
+    var resumeRefreshJob by remember { mutableStateOf<Job?>(null) }
+    var editingSkillName by rememberSaveable { mutableStateOf<String?>(null) }
+    var editingSkillContent by remember { mutableStateOf("") }
+    var editingSkillOriginalContent by remember { mutableStateOf("") }
+    var isSkillEditorLoading by remember { mutableStateOf(false) }
+    var isSkillEditorLoadFailed by remember { mutableStateOf(false) }
+    var isSkillEditorSaving by remember { mutableStateOf(false) }
+    var skillEditorError by remember { mutableStateOf<String?>(null) }
+    var skillLoadGen by remember { mutableIntStateOf(0) }
+    var conflictingAddons by remember { mutableStateOf<List<ConflictingAddonInfo>>(emptyList()) }
     var sshPanelState by remember { mutableStateOf(SshPanelState()) }
     var sshScanJob by remember { mutableStateOf<Job?>(null) }
     var sshScanGen by remember { mutableIntStateOf(0) }
     var sshFilterName by rememberSaveable { mutableStateOf(SshFilter.ALL.name) }
     var isSshEditorOpen by rememberSaveable { mutableStateOf(false) }
+    var isSshDeviceSaving by remember { mutableStateOf(false) }
     var editingSshDeviceId by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingDeleteSshDeviceId by rememberSaveable { mutableStateOf<String?>(null) }
     var isSshKeygenBusy by remember { mutableStateOf(false) }
@@ -626,22 +638,32 @@ private fun WorkstationRoot(
                         !isTokenDialogOpen &&
                         !isCodingModelsDialogOpen &&
                         !isAddSkillRepoDialogOpen &&
+                        editingSkillName == null &&
                         !isOtaTokenDialogOpen &&
                         !isTutorialOpen &&
                         !isSshEditorOpen &&
                         pendingDeleteSshDeviceId == null
                     ) {
-                        surfaceBridge.terminalView.post { surfaceBridge.terminalView.requestFocus() }
+                        surfaceBridge.terminalView.post {
+                            if (surfaceBridge.terminalView.hasWindowFocus()) {
+                                surfaceBridge.terminalView.requestFocus()
+                            }
+                        }
                     }
                     refreshSkillsState()
-                    scope.launch {
+                    resumeRefreshJob?.cancel()
+                    resumeRefreshJob = scope.launch {
+                        // Refresh conflicting add-ons immediately so returning from Android uninstall dismisses banner fast
+                        conflictingAddons = releaseUpdater.detectConflictingTermuxAddons()
                         ProcessGuardianService.refreshSnapshot(context)
                         tokenState = tokenWarden.inspectTokenState()
                         codingAgentsState = codingAgentsManager.inspectState()
+                        val wasScanning = sshPanelState.isScanning
                         sshPanelState = sshDevicesManager.inspectEnvironmentAndDevices(sshPanelState.probes)
+                            .copy(isScanning = wasScanning)
                         storageMetrics = storageOptimizer.inspectMetrics(storageMetrics.lastGcSummary)
                         releaseUpdater.refreshTokenState()
-                        if (latestSshPanelVisible) {
+                        if (latestSshPanelVisible && !wasScanning) {
                             triggerSshScan()
                         }
                     }
@@ -653,6 +675,8 @@ private fun WorkstationRoot(
                     cancelSshScan()
                     skillsRefreshJob?.cancel()
                     skillsRefreshJob = null
+                    resumeRefreshJob?.cancel()
+                    resumeRefreshJob = null
                     surfaceBridge.setCursorBlinker(false)
                     service?.setCustomTerminalSessionClient(null)
                 }
@@ -676,6 +700,7 @@ private fun WorkstationRoot(
         surfaceBridge.apply120HzFramePacing(activity)
         crdtDatabase.seedDefaultsIfFirstRun()
         refreshSkillsState()
+        conflictingAddons = releaseUpdater.detectConflictingTermuxAddons()
         tokenState = tokenWarden.inspectTokenState()
         codingAgentsState = codingAgentsManager.inspectState()
         sshPanelState = sshDevicesManager.inspectEnvironmentAndDevices(sshPanelState.probes)
@@ -683,6 +708,37 @@ private fun WorkstationRoot(
         releaseUpdater.refreshTokenState()
         ProcessGuardianService.refreshSnapshot(context)
         releaseUpdater.checkForUpdate(silentOnNetworkError = true)
+    }
+
+    // Load SKILL.md safely with monotonic generation guard so rapid switch/dismiss can never clobber state
+    LaunchedEffect(editingSkillName) {
+        val targetName = editingSkillName ?: return@LaunchedEffect
+        val gen = ++skillLoadGen
+        isSkillEditorLoading = true
+        isSkillEditorLoadFailed = false
+        skillEditorError = null
+        editingSkillContent = ""
+        editingSkillOriginalContent = ""
+        try {
+            skillsRepoManager.readSkillMarkdown(targetName)
+                .onSuccess { text ->
+                    if (gen == skillLoadGen && editingSkillName == targetName) {
+                        editingSkillContent = text
+                        editingSkillOriginalContent = text
+                        isSkillEditorLoadFailed = false
+                    }
+                }
+                .onFailure { err ->
+                    if (gen == skillLoadGen && editingSkillName == targetName) {
+                        isSkillEditorLoadFailed = true
+                        skillEditorError = err.message ?: "No se pudo leer SKILL.md"
+                    }
+                }
+        } finally {
+            if (gen == skillLoadGen && editingSkillName == targetName) {
+                isSkillEditorLoading = false
+            }
+        }
     }
 
     // Auto-refresh Agents & Skills status whenever the Agents panel becomes visible or PTY sessions change while visible
@@ -861,6 +917,79 @@ private fun WorkstationRoot(
         }
     }
 
+    val latestTermuxService by rememberUpdatedState(termuxService)
+
+    fun spawnSshCopyIdPtySession(device: SshDeviceRecord) {
+        if (!bootstrapReady && !CustomBootstrapProvisioner.isBootstrapInstalled()) {
+            onEnsureBootstrap()
+            notify("Extracting arm64 Linux runtime…")
+            return
+        }
+        if (!sshPanelState.opensshInstalled) {
+            spawnInstallOpenSshSession()
+            return
+        }
+        val currentService = latestTermuxService
+        if (currentService == null) {
+            notify("TermuxService aún iniciando…", showSnackbar = true)
+            return
+        }
+
+        fun launchCopyIdTab(service: TermuxService) {
+            val execPair = runCatching { sshDevicesManager.buildCopyIdPtyExec(device) }.getOrElse { err ->
+                notify(err.message ?: "No se encontró una clave pública SSH", showSnackbar = true)
+                return
+            }
+            val tabTitle = "key:${device.safeTabTitle.removePrefix("ssh:")}"
+            val created = runCatching {
+                service.createTermuxSession(
+                    execPair.first,
+                    execPair.second,
+                    null,
+                    TermuxConstants.TERMUX_HOME_DIR_PATH,
+                    false,
+                    tabTitle,
+                )
+            }.getOrNull()
+            if (created != null) {
+                cancelSshScan()
+                activeSessionIndex = (service.termuxSessions.size - 1).coerceAtLeast(0)
+                sessionListVersion++
+                primaryTab = PrimaryTab.TERMINAL
+                isPortraitSheetOpen = false
+                notify("Enviando clave pública → ${device.name}", showSnackbar = true)
+            } else {
+                notify("No se pudo abrir la pestaña ssh-copy-id", showSnackbar = true)
+            }
+        }
+
+        if (sshPanelState.defaultPublicKey == null && device.identityFile.isBlank()) {
+            if (isSshKeygenBusy) return
+            isSshKeygenBusy = true
+            scope.launch {
+                try {
+                    sshDevicesManager.generateDefaultEd25519Key(sshPanelState.probes)
+                        .onSuccess { updated ->
+                            sshPanelState = updated
+                            val liveService = latestTermuxService
+                            if (liveService != null) {
+                                launchCopyIdTab(liveService)
+                            } else {
+                                notify("Clave ED25519 lista — vuelve a tocar Enviar Key", showSnackbar = true)
+                            }
+                        }
+                        .onFailure { err ->
+                            notify(err.message ?: "Error al crear clave ED25519", showSnackbar = true)
+                        }
+                } finally {
+                    isSshKeygenBusy = false
+                }
+            }
+        } else {
+            launchCopyIdTab(currentService)
+        }
+    }
+
     fun spawnSkillsPtySession(subcommand: String, extraArgs: List<String> = emptyList()) {
         if (!bootstrapReady && !CustomBootstrapProvisioner.isBootstrapInstalled()) {
             onEnsureBootstrap()
@@ -969,6 +1098,10 @@ private fun WorkstationRoot(
                     onOpenAddSkillRepoDialog = {
                         isAddSkillRepoDialogOpen = true
                     },
+                    onOpenSkillEditor = { sk ->
+                        skillEditorError = null
+                        editingSkillName = sk.name
+                    },
                     onRunSkillsAction = { sub ->
                         spawnSkillsPtySession(sub)
                     },
@@ -1066,8 +1199,8 @@ private fun WorkstationRoot(
                     },
                     onGenerateSshKey = {
                         if (!isSshKeygenBusy) {
+                            isSshKeygenBusy = true
                             scope.launch {
-                                isSshKeygenBusy = true
                                 try {
                                     sshDevicesManager.generateDefaultEd25519Key(sshPanelState.probes)
                                         .onSuccess { updated ->
@@ -1087,6 +1220,7 @@ private fun WorkstationRoot(
                         }
                     },
                     onConnectDevice = { device -> spawnSshPtySession(device) },
+                    onPushPublicKey = { device -> spawnSshCopyIdPtySession(device) },
                     onRequestAddDevice = {
                         editingSshDeviceId = null
                         isSshEditorOpen = true
@@ -1108,6 +1242,12 @@ private fun WorkstationRoot(
                     installedReleaseTag = releaseUpdater.installedTag,
                     updateState = updateState,
                     hasPrivateRepoToken = hasPrivateRepoToken,
+                    conflictingAddons = conflictingAddons,
+                    onUninstallAddon = { pkg ->
+                        if (!releaseUpdater.openAddonUninstall(context, pkg)) {
+                            notify("No se pudo abrir desinstalador para $pkg", showSnackbar = true)
+                        }
+                    },
                     onCheckUpdates = {
                         notify("Checking GitHub Releases…", showSnackbar = true)
                         scope.launch { releaseUpdater.checkForUpdate(silentOnNetworkError = false) }
@@ -1467,11 +1607,12 @@ private fun WorkstationRoot(
                     }
                 }
             },
-            onSaveApiKey = { provider, rawKey ->
+            onSaveApiKey = { provider, rawKey, onSaved ->
                 scope.launch {
                     codingAgentsManager.saveProviderApiKey(provider, rawKey).onSuccess { updated ->
                         codingAgentsState = updated
                         codingModelsDialogError = null
+                        onSaved()
                         notify("${provider.displayName} key locked (0600)", showSnackbar = true)
                     }.onFailure { err ->
                         codingModelsDialogError = err.message ?: "Invalid API key"
@@ -1577,34 +1718,45 @@ private fun WorkstationRoot(
         }
         AddEditSshDeviceDialog(
             initial = editingDevice,
+            isSaving = isSshDeviceSaving,
             onDismiss = {
-                isSshEditorOpen = false
-                editingSshDeviceId = null
+                if (!isSshDeviceSaving) {
+                    isSshEditorOpen = false
+                    editingSshDeviceId = null
+                }
             },
-            onSave = { name, host, port, user, transport, identity, tags, onErr ->
+            onSave = { name, host, port, user, transport, identity, tags, localPortForwards, startupCommand, onErr ->
+                if (isSshDeviceSaving) return@AddEditSshDeviceDialog
+                isSshDeviceSaving = true
                 scope.launch {
-                    cancelSshScan()
-                    val existingSavedId = editingDevice
-                        ?.takeIf { it.source == com.termux.custom.ssh.SshDeviceSource.SAVED }
-                        ?.id
-                    sshDevicesManager.upsertDevice(
-                        id = existingSavedId,
-                        name = name,
-                        host = host,
-                        port = port,
-                        username = user,
-                        transport = transport,
-                        identityFile = identity,
-                        tags = tags,
-                        existingProbes = sshPanelState.probes,
-                    ).onSuccess { updated ->
-                        sshPanelState = updated
-                        isSshEditorOpen = false
-                        editingSshDeviceId = null
-                        notify("Guardado: $name", showSnackbar = true)
-                        triggerSshScan()
-                    }.onFailure { err ->
-                        onErr(err.message ?: "Error al guardar dispositivo")
+                    try {
+                        cancelSshScan()
+                        val existingSavedId = editingDevice
+                            ?.takeIf { it.source == com.termux.custom.ssh.SshDeviceSource.SAVED }
+                            ?.id
+                        sshDevicesManager.upsertDevice(
+                            id = existingSavedId,
+                            name = name,
+                            host = host,
+                            port = port,
+                            username = user,
+                            transport = transport,
+                            identityFile = identity,
+                            tags = tags,
+                            localPortForwards = localPortForwards,
+                            startupCommand = startupCommand,
+                            existingProbes = sshPanelState.probes,
+                        ).onSuccess { updated ->
+                            sshPanelState = updated
+                            isSshEditorOpen = false
+                            editingSshDeviceId = null
+                            notify("Guardado: $name", showSnackbar = true)
+                            triggerSshScan()
+                        }.onFailure { err ->
+                            onErr(err.message ?: "Error al guardar dispositivo")
+                        }
+                    } finally {
+                        isSshDeviceSaving = false
                     }
                 }
             },
@@ -1648,6 +1800,65 @@ private fun WorkstationRoot(
             onConnectRootRepo = { gitUrl ->
                 isAddSkillRepoDialogOpen = false
                 spawnSkillsPtySession("init", listOf(gitUrl))
+            },
+        )
+    }
+
+    val activeSkillName = editingSkillName
+    if (activeSkillName != null) {
+        val activeSkillInfo = skillsState.skills.firstOrNull { it.name == activeSkillName }
+        val hasUnsavedSkillEdits = !isSkillEditorLoading &&
+            !isSkillEditorLoadFailed &&
+            editingSkillContent != editingSkillOriginalContent
+        SkillMarkdownEditorDialog(
+            skillName = activeSkillName,
+            skillInfo = activeSkillInfo,
+            content = editingSkillContent,
+            isLoading = isSkillEditorLoading,
+            isLoadFailed = isSkillEditorLoadFailed,
+            isSaving = isSkillEditorSaving,
+            hasUnsavedChanges = hasUnsavedSkillEdits,
+            errorText = skillEditorError,
+            onContentChange = { next ->
+                editingSkillContent = next
+                skillEditorError = null
+            },
+            onSave = {
+                if (!isSkillEditorSaving && !isSkillEditorLoading && !isSkillEditorLoadFailed) {
+                    val targetName = activeSkillName
+                    val contentToSave = editingSkillContent
+                    isSkillEditorSaving = true
+                    skillEditorError = null
+                    scope.launch {
+                        try {
+                            skillsRepoManager.saveSkillMarkdown(targetName, contentToSave)
+                                .onSuccess {
+                                    editingSkillOriginalContent = contentToSave
+                                    editingSkillName = null
+                                    refreshSkillsState()
+                                    notify("Guardado $targetName/SKILL.md", showSnackbar = true)
+                                }
+                                .onFailure { err ->
+                                    skillEditorError = err.message ?: "Error al guardar SKILL.md"
+                                }
+                        } finally {
+                            isSkillEditorSaving = false
+                        }
+                    }
+                }
+            },
+            onOpenDiff = {
+                if (!isSkillEditorSaving) {
+                    editingSkillName = null
+                    skillEditorError = null
+                    spawnSkillsPtySession("diff")
+                }
+            },
+            onDismiss = {
+                if (!isSkillEditorSaving) {
+                    editingSkillName = null
+                    skillEditorError = null
+                }
             },
         )
     }

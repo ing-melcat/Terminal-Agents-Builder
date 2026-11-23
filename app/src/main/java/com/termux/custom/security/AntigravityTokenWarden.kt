@@ -157,6 +157,7 @@ class AntigravityTokenWarden(
                 OsConstants.O_WRONLY or OsConstants.O_CREAT or OsConstants.O_TRUNC or OsConstants.O_NOFOLLOW,
                 384, // 0600 from creation (zero TOCTOU)
             )
+            check(fd != null && fd.valid()) { "Os.open unavailable" }
             try {
                 FileOutputStream(fd).use { out ->
                     out.write(bytes)
@@ -165,23 +166,28 @@ class AntigravityTokenWarden(
             } finally {
                 runCatching { Os.close(fd) }
             }
+            check(tmpFile.isFile && tmpFile.length() == bytes.size.toLong()) { "Os.open write incomplete" }
             Os.chmod(tmpFile.absolutePath, 384)
             Os.rename(tmpFile.absolutePath, target.absolutePath)
-            target.isFile && target.length() > 0L
+            !tmpFile.exists() && target.isFile && target.length() == bytes.size.toLong()
         }.getOrDefault(false)
 
         if (!openedWithOs) {
             // Fallback for JVM/Robolectric test runner where Os.open/Os.rename may be stubbed
-            FileOutputStream(tmpFile).use { out ->
-                out.write(bytes)
-                out.fd.sync()
+            try {
+                FileOutputStream(tmpFile).use { out ->
+                    out.write(bytes)
+                    out.fd.sync()
+                }
+                enforceMode0600(tmpFile)
+                if (!tmpFile.renameTo(target)) {
+                    tmpFile.copyTo(target, overwrite = true)
+                    tmpFile.delete()
+                }
+                enforceMode0600(target)
+            } finally {
+                if (tmpFile.exists()) runCatching { tmpFile.delete() }
             }
-            enforceMode0600(tmpFile)
-            if (!tmpFile.renameTo(target)) {
-                tmpFile.copyTo(target, overwrite = true)
-                tmpFile.delete()
-            }
-            enforceMode0600(target)
         }
     }
 

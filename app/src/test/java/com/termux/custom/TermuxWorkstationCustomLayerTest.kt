@@ -8,6 +8,7 @@ import com.termux.custom.provisioning.CustomBootstrapProvisioner
 import com.termux.custom.security.AntigravityTokenWarden
 import com.termux.custom.ui.WorkstationFormFactor
 import com.termux.custom.ui.resolveFormFactor
+import com.termux.custom.updater.GitHubReleaseUpdater
 import com.termux.shared.termux.TermuxConstants
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -747,6 +748,306 @@ class TermuxWorkstationCustomLayerTest {
             tempRoot.deleteRecursively()
         }
     }
+
+    @Test
+    fun `SshDevicesManager v1_2 validates local port forwards, startup command, ssh-copy-id wrapper, and JSON persistence`() = runTest(testDispatcher) {
+        // 1. Tunnel parser accepts valid local:remote and local:host:remote specs (non-root localPort 1024..65535)
+        val parsed = com.termux.custom.ssh.SshDevicesManager.parseLocalPortForwards("11434:11434, 8888:localhost:8888 3000:127.0.0.1:80")
+        assertEquals(3, parsed.size)
+        assertEquals(11434, parsed[0].localPort)
+        assertEquals("127.0.0.1", parsed[0].remoteHost)
+        assertEquals(11434, parsed[0].remotePort)
+        assertEquals("localhost", parsed[1].remoteHost)
+        assertEquals(80, parsed[2].remotePort)
+
+        // Reject invalid/privileged local ports (<1024), duplicate local ports, >6 tunnels, leading dash remote host, traversal
+        assertTrue(runCatching { com.termux.custom.ssh.SshDevicesManager.parseLocalPortForwards("0:80") }.isFailure)
+        assertTrue(runCatching { com.termux.custom.ssh.SshDevicesManager.parseLocalPortForwards("80:80") }.isFailure)
+        assertTrue(runCatching { com.termux.custom.ssh.SshDevicesManager.parseLocalPortForwards("70000:80") }.isFailure)
+        assertTrue(runCatching { com.termux.custom.ssh.SshDevicesManager.parseLocalPortForwards("8080:80, 8080:90") }.isFailure)
+        assertTrue(runCatching { com.termux.custom.ssh.SshDevicesManager.parseLocalPortForwards("2001:1 2002:2 2003:3 2004:4 2005:5 2006:6 2007:7") }.isFailure)
+        assertTrue(runCatching { com.termux.custom.ssh.SshDevicesManager.parseLocalPortForwards("8080:-oProxy:80") }.isFailure)
+        assertTrue(runCatching { com.termux.custom.ssh.SshDevicesManager.parseLocalPortForwards("8080:bad..host:80") }.isFailure)
+
+        val tempRoot = java.nio.file.Files.createTempDirectory("melcat-ssh-v12-test").toFile()
+        try {
+            val prefixDir = java.io.File(tempRoot, "usr").apply { mkdirs() }
+            val binDir = java.io.File(prefixDir, "bin").apply { mkdirs() }
+            java.io.File(binDir, "ssh").apply { writeText("#!/bin/sh\n"); setExecutable(true) }
+            java.io.File(binDir, "ssh-copy-id").apply { writeText("#!/bin/sh\n"); setExecutable(true) }
+            java.io.File(binDir, "sh").apply { writeText("#!/bin/sh\n"); setExecutable(true) }
+            java.io.File(binDir, "login").apply { writeText("#!/bin/sh\n"); setExecutable(true) }
+
+            val homeDir = java.io.File(tempRoot, "home").apply { mkdirs() }
+            val sshDir = java.io.File(homeDir, ".ssh").apply { mkdirs() }
+            java.io.File(sshDir, "id_ed25519.pub").writeText("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMelcatV12TestKey rur-workstation\n")
+
+            val manager = com.termux.custom.ssh.SshDevicesManager(
+                prefixDir = prefixDir,
+                homeDir = homeDir,
+                ioDispatcher = testDispatcher,
+                tcpProber = { _, _, _ -> 12L },
+                tailscaleIpDetector = { "100.64.0.10" },
+            )
+
+            // 2. Persist tunnels & startup command atomically and reload
+            val saved = manager.upsertDevice(
+                id = null,
+                name = "Jetson Orin",
+                host = "100.64.9.5",
+                port = 2222,
+                username = "melcat",
+                transport = com.termux.custom.ssh.SshTransport.TAILSCALE,
+                identityFile = "",
+                tags = "ros2, ollama",
+                localPortForwards = "11434:11434, 8888:localhost:8888",
+                startupCommand = "tmux attach || tmux new",
+            ).getOrThrow()
+
+            val reloaded = manager.inspectEnvironmentAndDevices()
+            val jetson = reloaded.devices.first { it.name == "Jetson Orin" }
+            assertEquals("11434:11434, 8888:localhost:8888", jetson.localPortForwards)
+            assertEquals("tmux attach || tmux new", jetson.startupCommand)
+
+            // 3. Verify buildSshArgv emits loopback-bound -L tunnels, -t, --, host, and startup command
+            val sshArgv = manager.buildSshArgv(jetson)
+            assertTrue(sshArgv.contains("-L"))
+            assertTrue(sshArgv.contains("127.0.0.1:11434:127.0.0.1:11434"))
+            assertTrue(sshArgv.contains("127.0.0.1:8888:localhost:8888"))
+            val ddIdx = sshArgv.indexOf("--")
+            assertTrue(ddIdx > 0)
+            assertTrue("Must pass -t before -- when startupCommand is set", sshArgv.indexOf("-t") in 0 until ddIdx)
+            assertEquals("100.64.9.5", sshArgv[ddIdx + 1])
+            assertEquals("tmux attach || tmux new", sshArgv[ddIdx + 2])
+
+            // 4. Verify buildCopyIdPtyExec is 100% static (zero interpolation) & uses -o User=... -- host
+            val (shBin, copyArgv) = manager.buildCopyIdPtyExec(jetson)
+            assertTrue(shBin.endsWith("/bin/sh"))
+            assertEquals("-c", copyArgv[0])
+            assertFalse("Host must never be interpolated into copy-id wrapper", copyArgv[1].contains("100.64.9.5"))
+            assertFalse("Prefix must never be interpolated into copy-id wrapper", copyArgv[1].contains(tempRoot.name))
+            assertEquals("rur-copy-id", copyArgv[2])
+            assertTrue(copyArgv.contains("User=melcat"))
+            val copyDd = copyArgv.indexOf("--")
+            assertTrue(copyDd > 0)
+            assertEquals("100.64.9.5", copyArgv[copyDd + 1])
+
+            // 5. Explicit identityFile with missing .pub MUST fail instead of silently pushing id_ed25519.pub (P1-3)
+            val customKeyDevice = jetson.copy(identityFile = "jetson_custom_key")
+            assertTrue(runCatching { manager.buildCopyIdPtyExec(customKeyDevice) }.isFailure)
+
+            // 6. Symlinked .pub escaping ~/.ssh/ AND PEM private key masquerading as .pub must both be rejected
+            val outsideSecret = java.io.File(tempRoot, "secret.pub").apply { writeText("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOutsideSecret\n") }
+            val evilPubLink = java.io.File(sshDir, "evil.pub")
+            java.nio.file.Files.createSymbolicLink(evilPubLink.toPath(), outsideSecret.toPath())
+            val evilDevice = jetson.copy(identityFile = "evil")
+            assertTrue(runCatching { manager.buildCopyIdPtyExec(evilDevice) }.isFailure)
+
+            // Replace id_ed25519.pub with PEM private key -> readDefaultPublicKey must return null (clipboard protection)
+            java.io.File(sshDir, "id_ed25519.pub").writeText("-----BEGIN OPENSSH PRIVATE KEY-----\nSECRET\n")
+            val afterPem = manager.inspectEnvironmentAndDevices()
+            assertEquals(null, afterPem.defaultPublicKey)
+            assertTrue(saved.devices.isNotEmpty())
+        } finally {
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `SkillsRepoManager v1_2 reads, atomically writes SKILL_md, rejects live and dangling symlink escapes and enforces 128KB cap`() = runTest(testDispatcher) {
+        val tempRoot = java.nio.file.Files.createTempDirectory("melcat-skills-editor-test").toFile()
+        try {
+            val prefixDir = java.io.File(tempRoot, "usr").apply { mkdirs() }
+            val homeDir = java.io.File(tempRoot, "home").apply { mkdirs() }
+            val skillsDir = java.io.File(homeDir, ".gemini/config/skills").apply { mkdirs() }
+            val manager = com.termux.custom.skills.SkillsRepoManager(
+                prefixDir = prefixDir,
+                homeDir = homeDir,
+                ioDispatcher = testDispatcher,
+            )
+
+            // 1. Missing SKILL.md returns starter template with valid YAML frontmatter
+            val template = manager.readSkillMarkdown("ros2-helper").getOrThrow()
+            assertTrue(template.contains("name: ros2-helper"))
+            assertTrue(template.startsWith("---\n"))
+
+            // 2. Atomic write normalizes CRLF -> LF and round-trips UTF-8
+            val markdown = "---\r\nname: ros2-helper\r\ndescription: ROS 2 Humble helper\r\n---\r\n# ROS 2\r\nUsa `colcon build`.\r\n"
+            assertTrue(manager.saveSkillMarkdown("ros2-helper", markdown).isSuccess)
+            val readBack = manager.readSkillMarkdown("ros2-helper").getOrThrow()
+            assertFalse(readBack.contains("\r"))
+            assertTrue(readBack.contains("Usa `colcon build`."))
+
+            // 3. Reject traversal and > 128 KB payload
+            assertTrue(manager.readSkillMarkdown("../escape").isFailure)
+            assertTrue(manager.saveSkillMarkdown("../escape", "pwn").isFailure)
+            val oversized = "a".repeat(131_073)
+            assertTrue(manager.saveSkillMarkdown("ros2-helper", oversized).isFailure)
+
+            // 4. Reject symlinked skill directory pointing outside skillsDir
+            val outsideDir = java.io.File(tempRoot, "outside-skill").apply {
+                mkdirs()
+                java.io.File(this, "SKILL.md").writeText("outside secret")
+            }
+            java.nio.file.Files.createSymbolicLink(
+                java.io.File(skillsDir, "linked-dir").toPath(),
+                outsideDir.toPath(),
+            )
+            assertTrue(manager.readSkillMarkdown("linked-dir").isFailure)
+            assertTrue(manager.saveSkillMarkdown("linked-dir", "overwrite").isFailure)
+
+            // 5. Reject live symlinked SKILL.md inside a regular skill directory
+            val normalDir = java.io.File(skillsDir, "linked-file-skill").apply { mkdirs() }
+            val outsideFile = java.io.File(tempRoot, "outside.md").apply { writeText("secret") }
+            java.nio.file.Files.createSymbolicLink(
+                java.io.File(normalDir, "SKILL.md").toPath(),
+                outsideFile.toPath(),
+            )
+            assertTrue(manager.readSkillMarkdown("linked-file-skill").isFailure)
+            assertTrue(manager.saveSkillMarkdown("linked-file-skill", "overwrite").isFailure)
+            assertEquals("secret", outsideFile.readText())
+
+            // 6. Reject DANGLING symlink SKILL.md -> must fail both read and write without creating target (P1-1)
+            val danglingDir = java.io.File(skillsDir, "dangling-skill").apply { mkdirs() }
+            val nonexistentTarget = java.io.File(tempRoot, "never-create.md")
+            java.nio.file.Files.createSymbolicLink(
+                java.io.File(danglingDir, "SKILL.md").toPath(),
+                nonexistentTarget.toPath(),
+            )
+            assertTrue(manager.readSkillMarkdown("dangling-skill").isFailure)
+            assertTrue(manager.saveSkillMarkdown("dangling-skill", "pwn").isFailure)
+            assertFalse(nonexistentTarget.exists())
+        } finally {
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `CodingAgentsManager v1_2 locks DeepSeek, Anthropic, and OpenAI keys in 0600 vault with zero plaintext secrets in opencode_json`() = runTest(testDispatcher) {
+        val tempRoot = java.nio.file.Files.createTempDirectory("melcat-v12-providers-test").toFile()
+        try {
+            val prefixDir = java.io.File(tempRoot, "usr").apply { mkdirs() }
+            val homeDir = java.io.File(tempRoot, "home").apply { mkdirs() }
+            val manager = com.termux.custom.agents.CodingAgentsManager(
+                prefixDir = prefixDir,
+                homeDir = homeDir,
+                ioDispatcher = testDispatcher,
+            )
+
+            // Catalog presets exist for all 3 new direct providers
+            assertTrue(com.termux.custom.agents.CodingModelCatalog.presetsFor(com.termux.custom.agents.CodingProvider.DEEPSEEK).isNotEmpty())
+            assertTrue(com.termux.custom.agents.CodingModelCatalog.presetsFor(com.termux.custom.agents.CodingProvider.ANTHROPIC).isNotEmpty())
+            assertTrue(com.termux.custom.agents.CodingModelCatalog.presetsFor(com.termux.custom.agents.CodingProvider.OPENAI).isNotEmpty())
+
+            val dsSecret = "sk-deepseek-v12-secret-99999"
+            val claudeSecret = "sk-ant-api03-v12-secret-88888"
+            val oaiSecret = "sk-proj-openai-v12-secret-77777"
+
+            manager.saveProviderApiKey(com.termux.custom.agents.CodingProvider.DEEPSEEK, dsSecret).getOrThrow()
+            manager.saveProviderApiKey(com.termux.custom.agents.CodingProvider.ANTHROPIC, claudeSecret).getOrThrow()
+            val finalState = manager.saveProviderApiKey(com.termux.custom.agents.CodingProvider.OPENAI, oaiSecret).getOrThrow()
+
+            assertTrue(finalState.isProviderReady(com.termux.custom.agents.CodingProvider.DEEPSEEK))
+            assertTrue(finalState.isProviderReady(com.termux.custom.agents.CodingProvider.ANTHROPIC))
+            assertTrue(finalState.isProviderReady(com.termux.custom.agents.CodingProvider.OPENAI))
+
+            // Verify zero plaintext keys in opencode.json, only {file:...} references
+            val opencodeJson = java.io.File(homeDir, ".config/opencode/opencode.json").readText()
+            assertFalse(opencodeJson.contains(dsSecret))
+            assertFalse(opencodeJson.contains(claudeSecret))
+            assertFalse(opencodeJson.contains(oaiSecret))
+            assertTrue(opencodeJson.contains("{file:~/.config/melcat/vault/deepseek.key}"))
+            assertTrue(opencodeJson.contains("{file:~/.config/melcat/vault/anthropic.key}"))
+            assertTrue(opencodeJson.contains("{file:~/.config/melcat/vault/openai.key}"))
+
+            // Verify providers.env exports all 3 env vars for CLI agents (claude, opencode, etc.)
+            val providersEnv = java.io.File(homeDir, ".config/melcat/vault/providers.env").readText()
+            assertTrue(providersEnv.contains("export DEEPSEEK_API_KEY="))
+            assertTrue(providersEnv.contains("export ANTHROPIC_API_KEY="))
+            assertTrue(providersEnv.contains("export OPENAI_API_KEY="))
+
+            // Verify selecting a Claude direct preset updates active model
+            val claudePreset = com.termux.custom.agents.CodingModelCatalog.findById("anthropic/claude-sonnet-4-5")!!
+            val afterSelect = manager.selectCodingModel(claudePreset).getOrThrow()
+            assertEquals("anthropic/claude-sonnet-4-5", afterSelect.activeOpenCodeModel)
+
+            // Clear DeepSeek key and confirm removal from opencode.json and providers.env
+            val afterClear = manager.clearProviderApiKey(com.termux.custom.agents.CodingProvider.DEEPSEEK)
+            assertFalse(afterClear.isProviderReady(com.termux.custom.agents.CodingProvider.DEEPSEEK))
+            assertFalse(java.io.File(homeDir, ".config/melcat/vault/providers.env").readText().contains("DEEPSEEK_API_KEY"))
+        } finally {
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    @Suppress("DEPRECATION")
+    fun `GitHubReleaseUpdater v1_2 detects conflicting Termux add-ons sharing sharedUserId with mismatched certificates and ignores non-shared add-ons`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        assertTrue(GitHubReleaseUpdater.KNOWN_TERMUX_ADDONS.containsKey("com.termux.api"))
+        assertTrue(GitHubReleaseUpdater.KNOWN_TERMUX_ADDONS.containsKey("com.termux.x11"))
+
+        val shadowPm = org.robolectric.Shadows.shadowOf(context.packageManager)
+
+        // Register our own package with sharedUserId="com.termux" and cert A
+        val ownSig = android.content.pm.Signature(ByteArray(32) { 0x11 })
+        val ownPkg = android.content.pm.PackageInfo().apply {
+            packageName = context.packageName
+            sharedUserId = "com.termux"
+            signatures = arrayOf(ownSig)
+            applicationInfo = android.content.pm.ApplicationInfo().apply {
+                packageName = context.packageName
+            }
+        }
+        shadowPm.installPackage(ownPkg)
+
+        // Install com.termux.api sharing sharedUserId="com.termux" with mismatched cert B -> MUST be flagged
+        val mismatchSig = android.content.pm.Signature(ByteArray(32) { 0x22 })
+        val apiPkg = android.content.pm.PackageInfo().apply {
+            packageName = "com.termux.api"
+            sharedUserId = "com.termux"
+            signatures = arrayOf(mismatchSig)
+            applicationInfo = android.content.pm.ApplicationInfo().apply {
+                packageName = "com.termux.api"
+                nonLocalizedLabel = "Termux:API"
+            }
+        }
+        shadowPm.installPackage(apiPkg)
+
+        // Install com.termux.styling sharing sharedUserId="com.termux" with matching cert A -> MUST NOT be flagged
+        val matchingPkg = android.content.pm.PackageInfo().apply {
+            packageName = "com.termux.styling"
+            sharedUserId = "com.termux"
+            signatures = arrayOf(ownSig)
+            applicationInfo = android.content.pm.ApplicationInfo().apply {
+                packageName = "com.termux.styling"
+                nonLocalizedLabel = "Termux:Styling"
+            }
+        }
+        shadowPm.installPackage(matchingPkg)
+
+        // Install com.termux.x11 with mismatched cert B but NO sharedUserId -> MUST NOT be false-positived (P1-2)
+        val x11Pkg = android.content.pm.PackageInfo().apply {
+            packageName = "com.termux.x11"
+            sharedUserId = null
+            signatures = arrayOf(mismatchSig)
+            applicationInfo = android.content.pm.ApplicationInfo().apply {
+                packageName = "com.termux.x11"
+                nonLocalizedLabel = "Termux:X11"
+            }
+        }
+        shadowPm.installPackage(x11Pkg)
+
+        val conflicts = GitHubReleaseUpdater.detectConflictingTermuxAddons(context)
+        assertEquals(1, conflicts.size)
+        assertEquals("com.termux.api", conflicts.first().packageName)
+        assertEquals("Termux:API", conflicts.first().label)
+
+        // Non-allowlisted package must be rejected by openAddonUninstall
+        val updater = GitHubReleaseUpdater(context, currentTag = "v1.2", ioDispatcher = testDispatcher)
+        assertFalse(updater.openAddonUninstall(context, "com.android.settings"))
+    }
 }
+
 
 

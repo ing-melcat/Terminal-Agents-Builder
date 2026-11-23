@@ -38,6 +38,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.rememberScrollState
@@ -47,8 +48,10 @@ import com.termux.custom.agents.CodingProvider
 import com.termux.custom.data.AgentSessionRecord
 import com.termux.custom.guardian.GuardianStatus
 import com.termux.custom.security.OAuthTokenState
+import com.termux.custom.skills.SkillRepoInfo
 import com.termux.custom.skills.SkillsSummaryState
 import com.termux.custom.storage.StorageMetrics
+import com.termux.custom.updater.ConflictingAddonInfo
 import com.termux.custom.updater.ReleaseInfo
 import com.termux.custom.updater.UpdateState
 import java.io.File
@@ -66,6 +69,7 @@ internal fun AgentsWorkspacePanel(
     onRefreshAgentsState: () -> Unit,
     onOpenCodingModelsDialog: () -> Unit,
     onOpenAddSkillRepoDialog: () -> Unit,
+    onOpenSkillEditor: (SkillRepoInfo) -> Unit,
     onRunSkillsAction: (subcommand: String) -> Unit,
     onLaunchSafeCommand: (String) -> Unit,
     onNewContext: (title: String, agentType: String, summary: String) -> Unit,
@@ -224,7 +228,7 @@ internal fun AgentsWorkspacePanel(
                     }
 
                     Text(
-                        text = "~/.gemini/config/skills → agy · opencode · claude (rebase + autostash conserva mejoras del agente)",
+                        text = "~/.gemini/config/skills → agy · opencode · claude · Toca una skill para ver/editar SKILL.md",
                         fontSize = 10.sp,
                         color = WorkstationColors.TextSecondary,
                         maxLines = 2,
@@ -247,10 +251,17 @@ internal fun AgentsWorkspacePanel(
                                 Surface(
                                     shape = RoundedCornerShape(7.dp),
                                     color = WorkstationColors.SurfaceKeycap,
-                                    border = BorderStroke(1.dp, WorkstationColors.BorderHairline),
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (sk.hasLocalEdits) WorkstationColors.AccentAmber.copy(alpha = 0.45f)
+                                        else WorkstationColors.BorderHairline,
+                                    ),
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(7.dp))
+                                        .clickable { onOpenSkillEditor(sk) },
                                 ) {
                                     Row(
-                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(5.dp),
                                     ) {
@@ -268,6 +279,16 @@ internal fun AgentsWorkspacePanel(
                                             maxLines = 1,
                                             softWrap = false,
                                         )
+                                        if (sk.branch != null) {
+                                            Text(
+                                                text = sk.branch,
+                                                fontFamily = FontFamily.Monospace,
+                                                fontSize = 9.sp,
+                                                color = WorkstationColors.TextMuted,
+                                                maxLines = 1,
+                                                softWrap = false,
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -634,6 +655,8 @@ internal fun ShieldAndVaultPanel(
     installedReleaseTag: String,
     updateState: UpdateState,
     hasPrivateRepoToken: Boolean,
+    conflictingAddons: List<ConflictingAddonInfo>,
+    onUninstallAddon: (String) -> Unit,
     onCheckUpdates: () -> Unit,
     onDownloadUpdate: (ReleaseInfo) -> Unit,
     onInstallApk: (File) -> Unit,
@@ -713,10 +736,10 @@ internal fun ShieldAndVaultPanel(
                 color = WorkstationColors.SurfaceElevated,
                 border = BorderStroke(
                     1.dp,
-                    if (updateState is UpdateState.UpdateAvailable || updateState is UpdateState.ReadyToInstall) {
-                        WorkstationColors.BorderStrong
-                    } else {
-                        WorkstationColors.BorderHairline
+                    when {
+                        conflictingAddons.isNotEmpty() -> WorkstationColors.AccentAmber.copy(alpha = 0.6f)
+                        updateState is UpdateState.UpdateAvailable || updateState is UpdateState.ReadyToInstall -> WorkstationColors.BorderStrong
+                        else -> WorkstationColors.BorderHairline
                     },
                 ),
                 modifier = Modifier.fillMaxWidth(),
@@ -837,6 +860,74 @@ internal fun ShieldAndVaultPanel(
                         }
                     }
 
+                    if (conflictingAddons.isNotEmpty()) {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = WorkstationColors.AccentAmberWash,
+                            border = BorderStroke(1.dp, WorkstationColors.AccentAmber.copy(alpha = 0.5f)),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Text(
+                                    text = "Plugins Termux con firma distinta detectados",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = WorkstationColors.AccentAmber,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    text = "Comparten sharedUserId=\"com.termux\" y pueden bloquear actualizaciones con \"conflicto con un paquete\". Desinstálalos antes de actualizar:",
+                                    fontSize = 10.sp,
+                                    color = WorkstationColors.TextSecondary,
+                                )
+                                conflictingAddons.forEach { addon ->
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = addon.label,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Medium,
+                                                color = WorkstationColors.TextPrimary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                            Text(
+                                                text = addon.packageName,
+                                                fontFamily = FontFamily.Monospace,
+                                                fontSize = 9.sp,
+                                                color = WorkstationColors.TextMuted,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
+                                        OutlinedButton(
+                                            onClick = { onUninstallAddon(addon.packageName) },
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                            border = BorderStroke(1.dp, WorkstationColors.AccentAmber.copy(alpha = 0.65f)),
+                                        ) {
+                                            Text(
+                                                text = "Desinstalar",
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = WorkstationColors.AccentAmber,
+                                                maxLines = 1,
+                                                softWrap = false,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -916,7 +1007,7 @@ internal fun ShieldAndVaultPanel(
             }
         }
 
-        // Coding Models & API Providers Vault Card (OpenRouter, Mistral, Ollama LAN + Free $0)
+        // Coding Models & API Providers Vault Card (OpenRouter, Mistral, DeepSeek, Anthropic, OpenAI, Ollama LAN + Free $0)
         item {
             Surface(
                 shape = RoundedCornerShape(14.dp),
@@ -962,7 +1053,7 @@ internal fun ShieldAndVaultPanel(
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        text = "OpenRouter, Mistral Code & Ollama LAN locked to 0600 ({file:...}, excluded from snapshots).",
+                        text = "DeepSeek, Anthropic, OpenAI, OpenRouter, Mistral & Ollama LAN en 0600 ({file:...}, excluidos de snapshots).",
                         fontSize = 11.sp,
                         color = WorkstationColors.TextSecondary,
                     )

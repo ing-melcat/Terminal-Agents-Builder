@@ -47,6 +47,30 @@ enum class CodingProvider(
         requiresBaseUrl = false,
         subtitle = "API directa de Mistral para Codestral y Devstral",
     ),
+    DEEPSEEK(
+        id = "deepseek",
+        displayName = "DeepSeek",
+        envVar = "DEEPSEEK_API_KEY",
+        requiresApiKey = true,
+        requiresBaseUrl = false,
+        subtitle = "API directa oficial de DeepSeek (V3 Chat y R1 Reasoner)",
+    ),
+    ANTHROPIC(
+        id = "anthropic",
+        displayName = "Claude",
+        envVar = "ANTHROPIC_API_KEY",
+        requiresApiKey = true,
+        requiresBaseUrl = false,
+        subtitle = "API directa Anthropic (compatible con OpenCode y Claude CLI)",
+    ),
+    OPENAI(
+        id = "openai",
+        displayName = "OpenAI",
+        envVar = "OPENAI_API_KEY",
+        requiresApiKey = true,
+        requiresBaseUrl = false,
+        subtitle = "API directa OpenAI para familia GPT-5 / Codex",
+    ),
     OLLAMA(
         id = "ollama",
         displayName = "Ollama LAN",
@@ -236,7 +260,79 @@ object CodingModelCatalog {
             tier = CodingBudgetTier.PRO,
         ),
 
-        // 4. OLLAMA LOCAL / LAN — 100% Private & $0 Coding Weights
+        // 4. DEEPSEEK DIRECT API
+        CodingModelPreset(
+            id = "deepseek/deepseek-chat",
+            provider = CodingProvider.DEEPSEEK,
+            displayName = "DeepSeek V3 (Chat)",
+            specialty = "Endpoint directo DeepSeek · altísima calidad/precio en código",
+            contextWindow = "128K ctx",
+            priceLabel = "\$0.27 / \$1.10",
+            tier = CodingBudgetTier.BUDGET,
+            recommended = true,
+        ),
+        CodingModelPreset(
+            id = "deepseek/deepseek-reasoner",
+            provider = CodingProvider.DEEPSEEK,
+            displayName = "DeepSeek R1 (Reasoner)",
+            specialty = "Razonamiento profundo para debugging y arquitectura",
+            contextWindow = "128K ctx",
+            priceLabel = "\$0.55 / \$2.19",
+            tier = CodingBudgetTier.PRO,
+        ),
+
+        // 5. ANTHROPIC (CLAUDE) DIRECT API
+        CodingModelPreset(
+            id = "anthropic/claude-sonnet-4-5",
+            provider = CodingProvider.ANTHROPIC,
+            displayName = "Claude Sonnet 4.5",
+            specialty = "Estándar de ingeniería de software · OpenCode + Claude CLI",
+            contextWindow = "200K ctx",
+            priceLabel = "API Anthropic",
+            tier = CodingBudgetTier.PRO,
+            recommended = true,
+        ),
+        CodingModelPreset(
+            id = "anthropic/claude-haiku-4-5",
+            provider = CodingProvider.ANTHROPIC,
+            displayName = "Claude Haiku 4.5",
+            specialty = "Ultra rápido y económico para ediciones ágiles",
+            contextWindow = "200K ctx",
+            priceLabel = "API Anthropic",
+            tier = CodingBudgetTier.BUDGET,
+        ),
+        CodingModelPreset(
+            id = "anthropic/claude-opus-4-1",
+            provider = CodingProvider.ANTHROPIC,
+            displayName = "Claude Opus 4.1",
+            specialty = "Máxima capacidad de razonamiento en repos complejos",
+            contextWindow = "200K ctx",
+            priceLabel = "API Anthropic",
+            tier = CodingBudgetTier.PRO,
+        ),
+
+        // 6. OPENAI DIRECT API
+        CodingModelPreset(
+            id = "openai/gpt-5.1-codex-mini",
+            provider = CodingProvider.OPENAI,
+            displayName = "GPT-5.1 Codex Mini",
+            specialty = "Endpoint directo OpenAI · rápido para refactors y tests",
+            contextWindow = "400K ctx",
+            priceLabel = "API OpenAI",
+            tier = CodingBudgetTier.BUDGET,
+            recommended = true,
+        ),
+        CodingModelPreset(
+            id = "openai/gpt-5.3-codex",
+            provider = CodingProvider.OPENAI,
+            displayName = "GPT-5.3 Codex",
+            specialty = "Endpoint directo OpenAI · Codex frontier",
+            contextWindow = "400K ctx",
+            priceLabel = "API OpenAI",
+            tier = CodingBudgetTier.PRO,
+        ),
+
+        // 7. OLLAMA LOCAL / LAN — 100% Private & $0 Coding Weights
         CodingModelPreset(
             id = "ollama/qwen2.5-coder:7b",
             provider = CodingProvider.OLLAMA,
@@ -600,24 +696,42 @@ class CodingAgentsManager(
         runCatching { Os.chmod(vaultDir.absolutePath, 448) } // 0700
     }
 
-    private fun readTrimmedOrNull(file: File): String? =
-        if (file.isFile && file.length() > 0L) {
-            runCatching { file.readText().trim() }.getOrNull()?.takeIf { it.isNotEmpty() }
+    private fun isSymlinkFailClosed(file: File): Boolean = try {
+        val st = Os.lstat(file.absolutePath)
+        if (st != null && st.st_mode != 0) {
+            OsConstants.S_ISLNK(st.st_mode)
         } else {
-            null
+            runCatching { Files.isSymbolicLink(file.toPath()) }.getOrDefault(false)
         }
+    } catch (e: android.system.ErrnoException) {
+        e.errno != OsConstants.ENOENT
+    } catch (_: Throwable) {
+        runCatching { Files.isSymbolicLink(file.toPath()) }.getOrDefault(true)
+    }
+
+    private fun readTrimmedOrNull(file: File): String? {
+        if (isSymlinkFailClosed(file)) return null
+        if (!file.isFile || file.length() !in 1L..16_384L) return null
+        return runCatching { file.readText().trim() }.getOrNull()?.takeIf { it.isNotEmpty() }
+    }
 
     private fun writePlainFileAtomic(target: File, content: String) {
         val parent = target.parentFile ?: return
         if (!parent.exists()) parent.mkdirs()
         val tmp = File(parent, ".${target.name}.tmp.${System.nanoTime()}")
-        FileOutputStream(tmp).use { out ->
-            out.write(content.toByteArray(Charsets.UTF_8))
-            out.fd.sync()
-        }
-        if (!tmp.renameTo(target)) {
-            tmp.copyTo(target, overwrite = true)
-            tmp.delete()
+        try {
+            FileOutputStream(tmp).use { out ->
+                out.write(content.toByteArray(Charsets.UTF_8))
+                out.fd.sync()
+            }
+            if (!tmp.renameTo(target)) {
+                runCatching { Os.remove(target.absolutePath) }
+                target.delete()
+                tmp.copyTo(target, overwrite = true)
+                tmp.delete()
+            }
+        } finally {
+            if (tmp.exists()) runCatching { tmp.delete() }
         }
     }
 
@@ -629,41 +743,51 @@ class CodingAgentsManager(
         val tmpFile = File(parent, ".${target.name}.tmp.${System.nanoTime()}")
         val bytes = (content + "\n").toByteArray(Charsets.UTF_8)
 
-        val openedWithOs = runCatching {
-            val fd = Os.open(
-                tmpFile.absolutePath,
-                OsConstants.O_WRONLY or OsConstants.O_CREAT or OsConstants.O_TRUNC or OsConstants.O_NOFOLLOW,
-                384, // 0600 from creation (zero TOCTOU)
-            )
-            try {
-                FileOutputStream(fd).use { out ->
+        try {
+            val openedWithOs = runCatching {
+                val fd = Os.open(
+                    tmpFile.absolutePath,
+                    OsConstants.O_WRONLY or OsConstants.O_CREAT or OsConstants.O_EXCL or OsConstants.O_NOFOLLOW,
+                    384, // 0600 from creation (zero TOCTOU)
+                )
+                check(fd != null && fd.valid()) { "Os.open unavailable" }
+                try {
+                    FileOutputStream(fd).use { out ->
+                        out.write(bytes)
+                        out.fd.sync()
+                    }
+                } finally {
+                    runCatching { Os.close(fd) }
+                }
+                check(tmpFile.isFile && tmpFile.length() == bytes.size.toLong()) { "Os.open write incomplete" }
+                Os.chmod(tmpFile.absolutePath, 384)
+                Os.rename(tmpFile.absolutePath, target.absolutePath)
+                !tmpFile.exists() && target.isFile && target.length() == bytes.size.toLong()
+            }.getOrDefault(false)
+
+            if (!openedWithOs) {
+                FileOutputStream(tmpFile).use { out ->
                     out.write(bytes)
                     out.fd.sync()
                 }
-            } finally {
-                runCatching { Os.close(fd) }
+                enforceMode0600(tmpFile)
+                if (!tmpFile.renameTo(target)) {
+                    runCatching { Os.remove(target.absolutePath) }
+                    target.delete()
+                    tmpFile.copyTo(target, overwrite = true)
+                    tmpFile.delete()
+                }
+                enforceMode0600(target)
             }
-            Os.chmod(tmpFile.absolutePath, 384)
-            Os.rename(tmpFile.absolutePath, target.absolutePath)
-            target.isFile && target.length() > 0L
-        }.getOrDefault(false)
-
-        if (!openedWithOs) {
-            FileOutputStream(tmpFile).use { out ->
-                out.write(bytes)
-                out.fd.sync()
+        } finally {
+            if (tmpFile.exists() || isSymlinkFailClosed(tmpFile)) {
+                runCatching { secureWipeAndDelete(tmpFile) }
             }
-            enforceMode0600(tmpFile)
-            if (!tmpFile.renameTo(target)) {
-                tmpFile.copyTo(target, overwrite = true)
-                tmpFile.delete()
-            }
-            enforceMode0600(target)
         }
     }
 
     private fun enforceMode0600(file: File) {
-        if (!file.exists()) return
+        if (isSymlinkFailClosed(file) || !file.exists()) return
         runCatching { Os.chmod(file.absolutePath, 384) }
         file.setReadable(false, false)
         file.setWritable(false, false)
@@ -673,6 +797,11 @@ class CodingAgentsManager(
     }
 
     private fun secureWipeAndDelete(file: File) {
+        if (isSymlinkFailClosed(file)) {
+            runCatching { Os.remove(file.absolutePath) }
+            file.delete()
+            return
+        }
         if (!file.exists()) return
         runCatching {
             val len = file.length().coerceIn(0L, 65_536L).toInt()

@@ -60,6 +60,8 @@ data class SshDeviceRecord(
     val transport: SshTransport = SshTransport.DIRECT,
     val identityFile: String = "",
     val tags: String = "",
+    val localPortForwards: String = "",
+    val startupCommand: String = "",
     val source: SshDeviceSource = SshDeviceSource.SAVED,
     val lastConnectedAt: Long = 0L,
 ) {
@@ -221,6 +223,8 @@ class SshDevicesManager(
         transport: SshTransport,
         identityFile: String,
         tags: String,
+        localPortForwards: String = "",
+        startupCommand: String = "",
         existingProbes: Map<String, SshDeviceProbe> = emptyMap(),
     ): Result<SshPanelState> = withContext(ioDispatcher) {
         writeMutex.withLock {
@@ -235,6 +239,8 @@ class SshDevicesManager(
                     transport = transport,
                     identityFile = identityFile,
                     tags = tags,
+                    localPortForwards = localPortForwards,
+                    startupCommand = startupCommand,
                 )
                 val current = readSavedDevicesForMutation().toMutableList()
                 val idx = current.indexOfFirst { it.id == validated.id }
@@ -326,7 +332,8 @@ class SshDevicesManager(
 
     /**
      * Builds strict OS execve arguments for Termux OpenSSH client (`$PREFIX/bin/ssh`).
-     * Re-validates every field before launch and always places `--` before host to prevent option injection.
+     * Re-validates every field before launch, binds `-L` tunnels strictly to `127.0.0.1`,
+     * and always places `--` before host to prevent option injection.
      */
     fun buildSshArgv(device: SshDeviceRecord): Array<String> {
         val safe = validateRecord(
@@ -338,6 +345,8 @@ class SshDevicesManager(
             transport = device.transport,
             identityFile = device.identityFile,
             tags = device.tags,
+            localPortForwards = device.localPortForwards,
+            startupCommand = device.startupCommand,
             source = device.source,
             lastConnectedAt = device.lastConnectedAt,
         )
@@ -355,8 +364,19 @@ class SshDevicesManager(
             args.add("-i")
             args.add(File(sshDir, safe.identityFile).absolutePath)
         }
+        val tunnels = parseLocalPortForwards(safe.localPortForwards)
+        for (tunnel in tunnels) {
+            args.add("-L")
+            args.add("127.0.0.1:${tunnel.localPort}:${tunnel.remoteHost}:${tunnel.remotePort}")
+        }
+        if (safe.startupCommand.isNotBlank()) {
+            args.add("-t")
+        }
         args.add("--")
         args.add(safe.host)
+        if (safe.startupCommand.isNotBlank()) {
+            args.add(safe.startupCommand)
+        }
         return args.toTypedArray()
     }
 
@@ -375,6 +395,8 @@ class SshDevicesManager(
             transport = device.transport,
             identityFile = device.identityFile,
             tags = device.tags,
+            localPortForwards = device.localPortForwards,
+            startupCommand = device.startupCommand,
             source = device.source,
             lastConnectedAt = device.lastConnectedAt,
         )
@@ -400,6 +422,108 @@ class SshDevicesManager(
     }
 
     /**
+     * Builds a 100% static zero-interpolation `$PREFIX/bin/sh` execve invocation to push the
+     * user's public SSH key (`id_ed25519.pub` / configured key `.pub`) to the remote device
+     * via `ssh-copy-id` (with pure `ssh` fallback), allowing 1-tap passwordless login afterward.
+     */
+    fun buildCopyIdPtyExec(device: SshDeviceRecord): Pair<String, Array<String>> {
+        val safe = validateRecord(
+            id = device.id,
+            name = device.name,
+            host = device.host,
+            port = device.port,
+            username = device.username,
+            transport = device.transport,
+            identityFile = device.identityFile,
+            tags = device.tags,
+            localPortForwards = device.localPortForwards,
+            startupCommand = device.startupCommand,
+            source = device.source,
+            lastConnectedAt = device.lastConnectedAt,
+        )
+        val pubKeyFile = resolveSafePublicKeyFile(safe.identityFile)
+            ?: error("No se encontró clave pública en ~/.ssh/. Toca 'Crear Key' primero.")
+
+        val shBin = File(prefixDir, "bin/sh").absolutePath
+        val copyIdBin = File(prefixDir, "bin/ssh-copy-id").absolutePath
+        val sshBin = File(prefixDir, "bin/ssh").absolutePath
+        val loginBin = File(prefixDir, "bin/login").absolutePath
+        val bashBin = File(prefixDir, "bin/bash").absolutePath
+        val label = "${safe.name} (${safe.targetDisplay})"
+
+        val commonArgs = mutableListOf(
+            "-o", "ConnectTimeout=8",
+            "-p", safe.port.toString(),
+        )
+        if (safe.username.isNotBlank()) {
+            commonArgs.add("-o")
+            commonArgs.add("User=${safe.username}")
+        }
+        commonArgs.add("--")
+        commonArgs.add(safe.host)
+
+        val argv = ArrayList<String>(10 + commonArgs.size).apply {
+            add("-c")
+            add(COPY_ID_PTY_WRAPPER_SCRIPT)
+            add("rur-copy-id")
+            add(label)
+            add(copyIdBin)
+            add(sshBin)
+            add(pubKeyFile.absolutePath)
+            add(loginBin)
+            add(bashBin)
+            add(shBin)
+            addAll(commonArgs)
+        }
+        return shBin to argv.toTypedArray()
+    }
+
+    private fun isSymlinkFailClosed(file: File): Boolean = try {
+        val st = Os.lstat(file.absolutePath)
+        if (st != null && st.st_mode != 0) {
+            OsConstants.S_ISLNK(st.st_mode)
+        } else {
+            runCatching { java.nio.file.Files.isSymbolicLink(file.toPath()) }.getOrDefault(false)
+        }
+    } catch (e: android.system.ErrnoException) {
+        e.errno != OsConstants.ENOENT
+    } catch (_: Throwable) {
+        runCatching { java.nio.file.Files.isSymbolicLink(file.toPath()) }.getOrDefault(true)
+    }
+
+    private fun isValidOpenSshPublicKeyContent(text: String): Boolean {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty() || trimmed.contains('\n') || trimmed.contains('\r')) return false
+        if (trimmed.contains("-----BEGIN", ignoreCase = true)) return false
+        return trimmed.startsWith("ssh-") ||
+            trimmed.startsWith("ecdsa-sha2-") ||
+            trimmed.startsWith("sk-ssh-") ||
+            trimmed.startsWith("sk-ecdsa-")
+    }
+
+    private fun resolveSafePublicKeyFile(identityFile: String): File? {
+        // When the device specifies an explicit identityFile, NEVER silently push a different key
+        val candidates = if (identityFile.isNotBlank()) {
+            val base = identityFile.removeSuffix(".pub")
+            listOf("$base.pub")
+        } else {
+            listOf("id_ed25519.pub", "id_rsa.pub")
+        }
+        val canonicalSshDir = runCatching { sshDir.canonicalFile }.getOrNull() ?: return null
+        for (name in candidates) {
+            if (!PUBLIC_KEY_FILE_REGEX.matches(name) || name.startsWith('-')) continue
+            val candidate = File(sshDir, name)
+            if (isSymlinkFailClosed(candidate)) continue
+            if (!candidate.isFile || candidate.length() !in 16L..8192L) continue
+            val inDir = runCatching { candidate.canonicalFile.parentFile == canonicalSshDir }.getOrDefault(false)
+            if (!inDir) continue
+            val text = runCatching { candidate.readText(Charsets.UTF_8) }.getOrNull() ?: continue
+            if (isValidOpenSshPublicKeyContent(text)) return candidate
+        }
+        return null
+    }
+
+    /**
      * Builds a dedicated local PTY invocation for `workstation install-ssh` that never writes
      * keystrokes into any active remote SSH or TUI agent session.
      */
@@ -420,15 +544,13 @@ class SshDevicesManager(
     }
 
     private fun readDefaultPublicKey(): Pair<String?, String?> {
-        val candidates = listOf("id_ed25519.pub", "id_rsa.pub")
-        for (name in candidates) {
-            val f = File(sshDir, name)
-            if (f.isFile && f.length() in 16L..8192L) {
-                val text = runCatching { f.readText().trim() }.getOrNull()
-                if (!text.isNullOrBlank()) return name to text
-            }
+        val pubFile = resolveSafePublicKeyFile("") ?: return null to null
+        val text = runCatching { pubFile.readText(Charsets.UTF_8).trim() }.getOrNull()
+        return if (!text.isNullOrBlank() && isValidOpenSshPublicKeyContent(text)) {
+            pubFile.name to text
+        } else {
+            null to null
         }
-        return null to null
     }
 
     private data class MutableSshConfigHost(
@@ -602,6 +724,8 @@ class SshDevicesManager(
                     transport = transport,
                     identityFile = obj.optString("identityFile", ""),
                     tags = obj.optString("tags", ""),
+                    localPortForwards = obj.optString("localPortForwards", ""),
+                    startupCommand = obj.optString("startupCommand", ""),
                     source = SshDeviceSource.SAVED,
                     lastConnectedAt = obj.optLong("lastConnectedAt", 0L),
                 )
@@ -626,6 +750,8 @@ class SshDevicesManager(
                     put("transport", d.transport.name)
                     put("identityFile", d.identityFile)
                     put("tags", d.tags)
+                    put("localPortForwards", d.localPortForwards)
+                    put("startupCommand", d.startupCommand)
                     put("lastConnectedAt", d.lastConnectedAt)
                 }
             )
@@ -668,8 +794,9 @@ class SshDevicesManager(
                 }
                 enforceMode0600(tmp)
                 if (!tmp.renameTo(devicesFile)) {
-                    // Unlink target first so copy never follows a pre-existing symlink
-                    if (devicesFile.exists()) devicesFile.delete()
+                    // Unconditionally unlink target (even if dangling symlink) before fallback copy
+                    runCatching { Os.remove(devicesFile.absolutePath) }
+                    devicesFile.delete()
                     tmp.copyTo(devicesFile, overwrite = true)
                     tmp.delete()
                 }
@@ -681,7 +808,7 @@ class SshDevicesManager(
     }
 
     private fun enforceMode0600(file: File) {
-        if (!file.exists()) return
+        if (isSymlinkFailClosed(file) || !file.exists()) return
         runCatching { Os.chmod(file.absolutePath, 384) }
         file.setReadable(false, false)
         file.setWritable(false, false)
@@ -690,14 +817,25 @@ class SshDevicesManager(
         file.setWritable(true, true)
     }
 
+    data class LocalPortForward(
+        val localPort: Int,
+        val remoteHost: String,
+        val remotePort: Int,
+    ) {
+        fun toDisplaySpec(): String =
+            if (remoteHost == "127.0.0.1") "$localPort:$remotePort" else "$localPort:$remoteHost:$remotePort"
+    }
+
     companion object {
         private const val MAX_CONCURRENT_PROBES = 8
         private const val MAX_CONFIG_BYTES = 262_144L
+        private const val MAX_TUNNELS_PER_DEVICE = 6
         private const val SSH_CONFIG_ID_PREFIX = "sshcfg:"
         private val HOST_REGEX = Regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
         private val IPV6_CHARS_REGEX = Regex("^[0-9A-Fa-f:.]{2,45}$")
         private val USER_REGEX = Regex("^[A-Za-z0-9._][A-Za-z0-9._-]{0,63}$")
         private val IDENTITY_FILE_REGEX = Regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+        private val PUBLIC_KEY_FILE_REGEX = Regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\\.pub$")
 
         private val SSH_PTY_WRAPPER_SCRIPT = """
             label="${'$'}1"
@@ -713,6 +851,40 @@ class SshDevicesManager(
                 "${'$'}ssh_bin" "${'$'}@"
                 rc=${'$'}?
                 printf '\n\033[1;33m[RUR SSH]\033[0m Session ended (exit %d). Returning to local shell...\n' "${'$'}rc"
+            fi
+            if [ -x "${'$'}login_bin" ]; then
+                exec "${'$'}login_bin"
+            elif [ -x "${'$'}{SHELL:-}" ]; then
+                exec "${'$'}SHELL" -l
+            elif [ -x "${'$'}bash_bin" ]; then
+                exec "${'$'}bash_bin" -l
+            else
+                exec "${'$'}sh_bin"
+            fi
+        """.trimIndent()
+
+        private val COPY_ID_PTY_WRAPPER_SCRIPT = """
+            label="${'$'}1"
+            copy_id_bin="${'$'}2"
+            ssh_bin="${'$'}3"
+            pub_key="${'$'}4"
+            login_bin="${'$'}5"
+            bash_bin="${'$'}6"
+            sh_bin="${'$'}7"
+            shift 7
+            printf '\033[1;33m[RUR SSH]\033[0m Installing public key on %s ...\n' "${'$'}label"
+            if [ ! -r "${'$'}pub_key" ]; then
+                printf '\033[1;31m[RUR SSH]\033[0m Public key missing: %s\n' "${'$'}pub_key"
+            elif [ -x "${'$'}copy_id_bin" ]; then
+                "${'$'}copy_id_bin" -i "${'$'}pub_key" "${'$'}@"
+                rc=${'$'}?
+                printf '\n\033[1;33m[RUR SSH]\033[0m ssh-copy-id finished (exit %d).\n' "${'$'}rc"
+            elif [ -x "${'$'}ssh_bin" ]; then
+                "${'$'}ssh_bin" "${'$'}@" 'umask 077 && mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && { [ ! -s ~/.ssh/authorized_keys ] || printf "\n"; cat; } >> ~/.ssh/authorized_keys' < "${'$'}pub_key"
+                rc=${'$'}?
+                printf '\n\033[1;33m[RUR SSH]\033[0m Public key push finished (exit %d).\n' "${'$'}rc"
+            else
+                printf '\033[1;31m[RUR SSH]\033[0m OpenSSH not installed. Run: workstation install-ssh\n'
             fi
             if [ -x "${'$'}login_bin" ]; then
                 exec "${'$'}login_bin"
@@ -778,6 +950,51 @@ class SshDevicesManager(
             return doubleColons <= 1
         }
 
+        /**
+         * Parses & strictly validates comma/whitespace-separated local port forwards:
+         * - `localPort:remotePort` (binds `127.0.0.1:localPort -> 127.0.0.1:remotePort`)
+         * - `localPort:remoteHost:remotePort` (binds `127.0.0.1:localPort -> remoteHost:remotePort`)
+         */
+        fun parseLocalPortForwards(raw: String): List<LocalPortForward> {
+            val trimmed = raw.trim()
+            if (trimmed.isEmpty()) return emptyList()
+            val tokens = trimmed.split(Regex("[,\\s]+")).filter { it.isNotBlank() }
+            require(tokens.size <= MAX_TUNNELS_PER_DEVICE) {
+                "Máximo $MAX_TUNNELS_PER_DEVICE túneles locales por dispositivo"
+            }
+            val seenLocalPorts = HashSet<Int>()
+            return tokens.map { tok ->
+                val parts = tok.split(':')
+                when (parts.size) {
+                    2 -> {
+                        val lp = parts[0].toIntOrNull()
+                        val rp = parts[1].toIntOrNull()
+                        require(lp != null && lp in 1024..65535 && rp != null && rp in 1..65535) {
+                            "Túnel inválido '$tok' (puerto local 1024–65535, remoto 1–65535)"
+                        }
+                        require(seenLocalPorts.add(lp)) { "Puerto local duplicado en túneles: $lp" }
+                        LocalPortForward(localPort = lp, remoteHost = "127.0.0.1", remotePort = rp)
+                    }
+                    3 -> {
+                        val lp = parts[0].toIntOrNull()
+                        val rh = parts[1].trim()
+                        val rp = parts[2].toIntOrNull()
+                        require(lp != null && lp in 1024..65535 && rp != null && rp in 1..65535) {
+                            "Túnel inválido '$tok' (puerto local 1024–65535, remoto 1–65535)"
+                        }
+                        require(rh.isNotEmpty() && !rh.startsWith('-') && !rh.contains("..") && HOST_REGEX.matches(rh)) {
+                            "Host remoto inválido en túnel '$tok'"
+                        }
+                        require(seenLocalPorts.add(lp)) { "Puerto local duplicado en túneles: $lp" }
+                        LocalPortForward(localPort = lp, remoteHost = rh, remotePort = rp)
+                    }
+                    else -> throw IllegalArgumentException(
+                        "Túnel inválido '$tok' (usa local:remoto o local:host:remoto, ej. 11434:11434)"
+                    )
+                }
+            }
+        }
+
         fun validateRecord(
             id: String,
             name: String,
@@ -787,6 +1004,8 @@ class SshDevicesManager(
             transport: SshTransport,
             identityFile: String,
             tags: String,
+            localPortForwards: String = "",
+            startupCommand: String = "",
             source: SshDeviceSource = SshDeviceSource.SAVED,
             lastConnectedAt: Long = 0L,
         ): SshDeviceRecord {
@@ -823,6 +1042,9 @@ class SshDevicesManager(
             }
 
             val cleanTags = tags.trim().filterNot { it.isISOControl() }.take(64)
+            val normalizedForwards = parseLocalPortForwards(localPortForwards)
+                .joinToString(", ") { it.toDisplaySpec() }
+            val cleanStartup = startupCommand.trim().filterNot { it.isISOControl() }.take(160)
 
             return SshDeviceRecord(
                 id = id,
@@ -833,6 +1055,8 @@ class SshDevicesManager(
                 transport = transport,
                 identityFile = cleanIdentity,
                 tags = cleanTags,
+                localPortForwards = normalizedForwards,
+                startupCommand = cleanStartup,
                 source = source,
                 lastConnectedAt = lastConnectedAt,
             )
