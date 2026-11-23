@@ -1156,9 +1156,9 @@ class TermuxWorkstationCustomLayerTest {
             assertTrue(configured.ros2Ready)
             assertEquals("pi-1", configured.linkedPiSshDeviceId)
 
-            // 2. Login against mock PAGE_RUR DB API (/api/login.php first matching LoginApp.tsx)
+            // 2. Login against mock PAGE_RUR DB API (/api/login first matching PAGE_RUR Caddyfile & svc-identity)
             val loggedIn = manager.loginOperator("23040123", "123456").getOrThrow()
-            assertEquals("/api/login.php", capturedLoginPath.get())
+            assertEquals("/api/login", capturedLoginPath.get())
             assertTrue(capturedLoginBody.get().contains("\"matricula\":\"23040123\""))
             assertTrue(capturedLoginBody.get().contains("\"password\":\"123456\""))
             assertTrue(capturedLoginBody.get().contains("\"code\":\"123456\""))
@@ -1229,11 +1229,20 @@ class TermuxWorkstationCustomLayerTest {
         assertTrue(com.termux.custom.rur.RurControlCenterManager.validateWebApiUrl("https://rur.unipolidgo.edu.mx/").isSuccess)
         assertTrue(com.termux.custom.rur.RurControlCenterManager.validateWebApiUrl("http://127.0.0.1:3001").isSuccess)
 
-        // Legacy `rol` string and modern `roles` JSONB array both parse accurately
+        // DoH JSON A-record parser + fallback IP for rur.unipolidgo.edu.mx when ISP DNS fails on SERVFAIL
+        val dohSample = """{"Status":0,"Answer":[{"name":"rur.unipolidgo.edu.mx","type":1,"TTL":3600,"data":"187.245.209.200"}]}"""
+        assertEquals("187.245.209.200", com.termux.custom.rur.RurControlCenterManager.parseFirstIpv4FromDnsJson(dohSample))
+
+        // Legacy `rol` string, modern `roles` JSONB array, and PAGE_RUR `permisos` array (`robots.operar`) all parse accurately
         val legacyUser = org.json.JSONObject("""{"matricula":"admin","nombre":"Admin","rol":"admin"}""")
         val legacyParsed = com.termux.custom.rur.RurControlCenterManager.parseOperatorSessionFromUserJson(legacyUser, "admin", true)
         assertTrue(legacyParsed.isAdmin)
         assertTrue(legacyParsed.canOperate)
+
+        val customRoleOperator = org.json.JSONObject("""{"matricula":"2403150025","nombre":"Luis","roles":["Software"],"permisos":["robots.operar"]}""")
+        val customParsed = com.termux.custom.rur.RurControlCenterManager.parseOperatorSessionFromUserJson(customRoleOperator, "2403150025", true)
+        assertTrue(customParsed.canOperate)
+        assertEquals("SOFTWARE", customParsed.primaryRoleLabel)
 
         val memberUser = org.json.JSONObject("""{"matricula":"23040999","nombre":"Visitante","roles":["miembro"]}""")
         val memberParsed = com.termux.custom.rur.RurControlCenterManager.parseOperatorSessionFromUserJson(memberUser, "23040999", true)

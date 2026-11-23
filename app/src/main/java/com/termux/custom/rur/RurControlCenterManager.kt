@@ -11,9 +11,13 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.net.URI
 import java.net.URL
 import java.net.URLEncoder
+import java.net.UnknownHostException
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.security.SecureRandom
@@ -22,6 +26,11 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.ConcurrentHashMap
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SNIHostName
+import javax.net.ssl.SSLParameters
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
 
 enum class RurModuleCategory(val label: String) {
     LIVEKIT_RECEIVERS("Receptores LiveKit"),
@@ -108,12 +117,15 @@ data class RurOperatorSession(
     val loginAtIso: String,
     val expiresAtEpochMs: Long,
     val hasSessionAuth: Boolean,
+    val permisos: List<String> = emptyList(),
 ) {
     val displayName: String
         get() = alias.ifBlank { nombre.ifBlank { matricula } }
 
     val canOperate: Boolean
-        get() = roles.any { it.equals("admin", ignoreCase = true) || it.equals("operador", ignoreCase = true) }
+        get() = isAdmin ||
+            permisos.any { it.equals("robots.operar", ignoreCase = true) } ||
+            roles.any { it.equals("operador", ignoreCase = true) }
 
     val isAdmin: Boolean
         get() = roles.any { it.equals("admin", ignoreCase = true) }
@@ -121,6 +133,8 @@ data class RurOperatorSession(
     val primaryRoleLabel: String
         get() = when {
             isAdmin -> "ADMIN"
+            roles.firstOrNull { !it.equals("miembro", ignoreCase = true) } != null ->
+                roles.first { !it.equals("miembro", ignoreCase = true) }.uppercase(Locale.US)
             canOperate -> "OPERADOR"
             else -> roles.firstOrNull()?.uppercase(Locale.US)?.ifBlank { "MIEMBRO" } ?: "MIEMBRO"
         }
@@ -513,11 +527,12 @@ class RurControlCenterManager(
             "User-Agent" to USER_AGENT,
         )
 
-        // Match LoginApp.tsx (`/api/login.php`) first, falling back to `/api/login` if 404/405
+        // Match PAGE_RUR (`POST /api/login` in LoginApp.tsx + Caddyfile `@identity`) first,
+        // with automatic fallback to `/api/login.php` for legacy PHP backends on 404/405
         var httpRes = runCatching {
             executeHttpJson(
                 method = "POST",
-                urlStr = "$baseUrl/api/login.php",
+                urlStr = "$baseUrl/api/login",
                 headers = reqHeaders,
                 body = payload,
             )
@@ -530,7 +545,7 @@ class RurControlCenterManager(
             val fallbackRes = runCatching {
                 executeHttpJson(
                     method = "POST",
-                    urlStr = "$baseUrl/api/login",
+                    urlStr = "$baseUrl/api/login.php",
                     headers = reqHeaders,
                     body = payload,
                 )
@@ -965,10 +980,13 @@ class RurControlCenterManager(
         }
 
         if (res.statusCode == 401 || res.statusCode == 403) {
-            // Try public robots fallback if server returned auth error on /api/robots
+            // Try PAGE_RUR public robots fallback (/api/robots/publicos, then legacy /api/public-robots)
             val pub = runCatching {
-                executeHttpJson("GET", "$baseUrl/api/public-robots", mapOf("User-Agent" to USER_AGENT), null)
-            }.getOrNull()
+                executeHttpJson("GET", "$baseUrl/api/robots/publicos", mapOf("User-Agent" to USER_AGENT), null)
+            }.getOrNull()?.takeIf { it.statusCode in 200..299 }
+                ?: runCatching {
+                    executeHttpJson("GET", "$baseUrl/api/public-robots", mapOf("User-Agent" to USER_AGENT), null)
+                }.getOrNull()
             if (pub != null && pub.statusCode in 200..299) {
                 res = pub
             } else {
@@ -1077,41 +1095,53 @@ class RurControlCenterManager(
             }
         }
 
-        // 2. Operator DB token (POST /api/livekit-token for admin/operador, or viewer fallback for miembro)
+        // 2. Operator/Viewer DB token (POST /api/livekit-token in PAGE_RUR svc-robots issues operator or viewer token based on robots.operar permission!)
         if (baseUrl != null && operatorAuth != null) {
-            if (operatorAuth.session.canOperate) {
-                val headers = buildOperatorAuthHeaders(operatorAuth, includeCsrf = true) +
-                    ("Content-Type" to "application/json")
-                val body = JSONObject().put("robotId", robot.id).toString()
-                val res = runCatching {
-                    executeHttpJson("POST", "$baseUrl/api/livekit-token", headers, body)
-                }.getOrNull()
-                if (res != null && res.statusCode in 200..299) {
-                    val json = runCatching { JSONObject(res.body) }.getOrNull()
-                    val tok = json?.optString("token", "").orEmpty().trim()
-                    if (json != null && json.optBoolean("success", false) && tok.isNotEmpty()) {
+            val headers = buildOperatorAuthHeaders(operatorAuth, includeCsrf = true) +
+                ("Content-Type" to "application/json")
+            val body = JSONObject().put("robotId", robot.id).toString()
+            val res = runCatching {
+                executeHttpJson("POST", "$baseUrl/api/livekit-token", headers, body)
+            }.getOrNull()
+            if (res != null && res.statusCode in 200..299) {
+                val json = runCatching { JSONObject(res.body) }.getOrNull()
+                val tok = json?.optString("token", "").orEmpty().trim()
+                if (json != null && json.optBoolean("success", false) && tok.isNotEmpty()) {
+                    if (operatorAuth.session.canOperate) {
                         operatorTok = tok
-                        if (receiverTok.isEmpty()) receiverTok = tok
-                        lkUrl = json.optString("livekitUrl", lkUrl).ifBlank { lkUrl }
-                        lkRoom = json.optString("room", lkRoom).ifBlank { lkRoom }
-                        source = if (source == "control_center_key") "control_center+operator" else "operator_db"
                     }
+                    if (receiverTok.isEmpty()) receiverTok = tok
+                    lkUrl = json.optString("livekitUrl", lkUrl).ifBlank { lkUrl }
+                    lkRoom = json.optString("room", lkRoom).ifBlank { lkRoom }
+                    source = if (source == "control_center_key") "control_center+operator" else "operator_db"
                 }
             }
 
-            // Read-only viewer token fallback if no token yet
+            // Read-only viewer token fallback (POST /api/livekit/public-token in PAGE_RUR, or legacy GET /api/livekit-viewer-token/:id)
             if (receiverTok.isEmpty() && operatorTok.isEmpty()) {
-                val encodedId = URLEncoder.encode(robot.id, StandardCharsets.UTF_8.name())
-                val res = runCatching {
+                val pubRes = runCatching {
                     executeHttpJson(
-                        method = "GET",
-                        urlStr = "$baseUrl/api/livekit-viewer-token/$encodedId",
-                        headers = buildOperatorAuthHeaders(operatorAuth, includeCsrf = false),
-                        body = null,
+                        method = "POST",
+                        urlStr = "$baseUrl/api/livekit/public-token",
+                        headers = mapOf(
+                            "Content-Type" to "application/json",
+                            "Accept" to "application/json",
+                            "User-Agent" to USER_AGENT,
+                        ),
+                        body = JSONObject().put("robotId", robot.id).toString(),
                     )
-                }.getOrNull()
-                if (res != null && res.statusCode in 200..299) {
-                    val json = runCatching { JSONObject(res.body) }.getOrNull()
+                }.getOrNull()?.takeIf { it.statusCode in 200..299 }
+                    ?: runCatching {
+                        val encodedId = URLEncoder.encode(robot.id, StandardCharsets.UTF_8.name())
+                        executeHttpJson(
+                            method = "GET",
+                            urlStr = "$baseUrl/api/livekit-viewer-token/$encodedId",
+                            headers = buildOperatorAuthHeaders(operatorAuth, includeCsrf = false),
+                            body = null,
+                        )
+                    }.getOrNull()
+                if (pubRes != null && pubRes.statusCode in 200..299) {
+                    val json = runCatching { JSONObject(pubRes.body) }.getOrNull()
                     val tok = json?.optString("token", "").orEmpty().trim()
                     if (json != null && json.optBoolean("success", false) && tok.isNotEmpty()) {
                         receiverTok = tok
@@ -1332,69 +1362,130 @@ class RurControlCenterManager(
         }
 
         for (hop in 0..MAX_REDIRECTS) {
-            val conn = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
-                instanceFollowRedirects = false
-                requestMethod = currentMethod
-                connectTimeout = 8_000
-                readTimeout = 10_000
-                doInput = true
-                val targetUri = URI(currentUrl)
-                val sameSecureOrigin = targetUri.scheme.equals(originUri.scheme, ignoreCase = true) &&
-                    targetUri.host.equals(originUri.host, ignoreCase = true) &&
-                    effectivePort(targetUri) == effectivePort(originUri)
-                headers.forEach { (k, v) ->
-                    val isSensitive = k.equals("Authorization", ignoreCase = true) ||
-                        k.equals("Cookie", ignoreCase = true) ||
-                        k.equals("X-CSRF-Token", ignoreCase = true)
-                    if (!isSensitive || sameSecureOrigin) {
-                        setRequestProperty(k, v)
-                    }
+            val targetUri = URI(currentUrl)
+            val sameSecureOrigin = targetUri.scheme.equals(originUri.scheme, ignoreCase = true) &&
+                targetUri.host.equals(originUri.host, ignoreCase = true) &&
+                effectivePort(targetUri) == effectivePort(originUri)
+
+            val filteredHeaders = LinkedHashMap<String, String>()
+            headers.forEach { (k, v) ->
+                val isSensitive = k.equals("Authorization", ignoreCase = true) ||
+                    k.equals("Cookie", ignoreCase = true) ||
+                    k.equals("X-CSRF-Token", ignoreCase = true)
+                if (!isSensitive || sameSecureOrigin) {
+                    filteredHeaders[k] = v
                 }
             }
-            try {
-                if (currentBody != null && (currentMethod == "POST" || currentMethod == "PUT" || currentMethod == "PATCH")) {
-                    conn.doOutput = true
-                    val bytes = currentBody.toByteArray(StandardCharsets.UTF_8)
-                    conn.setFixedLengthStreamingMode(bytes.size)
-                    conn.outputStream.use { it.write(bytes) }
-                }
 
-                val code = conn.responseCode
-                if (code in setOf(301, 302, 303, 307, 308) && hop < MAX_REDIRECTS) {
-                    val loc = conn.getHeaderField("Location")?.trim().orEmpty()
-                    if (loc.isNotEmpty()) {
-                        val nextUri = URI(currentUrl).resolve(loc)
-                        validateWebApiUrl(nextUri.toString()).getOrThrow()
-                        val sameOrigin = nextUri.scheme.equals(originUri.scheme, ignoreCase = true) &&
-                            nextUri.host.equals(originUri.host, ignoreCase = true) &&
-                            effectivePort(nextUri) == effectivePort(originUri)
-                        if (hasSensitiveReq && !sameOrigin) {
-                            throw SecurityException("Redirección cross-origin bloqueada para solicitud autenticada.")
-                        }
-                        currentUrl = nextUri.toString()
-                        if (code == 303) {
-                            currentMethod = "GET"
-                            currentBody = null
-                        }
-                        continue
-                    }
-                }
-
-                val stream = if (code in 200..399) conn.inputStream else (conn.errorStream ?: conn.inputStream)
-                val text = if (stream != null) readBoundedUtf8(stream, MAX_HTTP_BODY_BYTES) else ""
-                val cookies = extractMergedCookies(conn)
-                val etag = conn.getHeaderField("ETag")
-                return HttpJsonResult(
-                    statusCode = code,
-                    body = text,
-                    etag = etag,
-                    cookieHeader = cookies,
+            val hopRes = try {
+                performSingleHttpHop(
+                    urlStr = currentUrl,
+                    method = currentMethod,
+                    headers = filteredHeaders,
+                    body = currentBody,
+                    overrideIp = null,
+                    sniHostname = null,
                 )
-            } finally {
-                conn.disconnect()
+            } catch (uhe: UnknownHostException) {
+                val host = targetUri.host?.lowercase(Locale.US).orEmpty()
+                if (targetUri.scheme.equals("https", ignoreCase = true) && host.isNotEmpty()) {
+                    val resolvedIp = resolveHostViaDoHOrFallback(host)
+                        ?: throw uhe
+                    performSingleHttpHop(
+                        urlStr = currentUrl,
+                        method = currentMethod,
+                        headers = filteredHeaders,
+                        body = currentBody,
+                        overrideIp = resolvedIp,
+                        sniHostname = host,
+                    )
+                } else {
+                    throw uhe
+                }
             }
+
+            val code = hopRes.statusCode
+            if (code in setOf(301, 302, 303, 307, 308) && hop < MAX_REDIRECTS) {
+                val loc = hopRes.redirectLocation.orEmpty()
+                if (loc.isNotEmpty()) {
+                    val nextUri = URI(currentUrl).resolve(loc)
+                    validateWebApiUrl(nextUri.toString()).getOrThrow()
+                    val sameOrigin = nextUri.scheme.equals(originUri.scheme, ignoreCase = true) &&
+                        nextUri.host.equals(originUri.host, ignoreCase = true) &&
+                        effectivePort(nextUri) == effectivePort(originUri)
+                    if (hasSensitiveReq && !sameOrigin) {
+                        throw SecurityException("Redirección cross-origin bloqueada para solicitud autenticada.")
+                    }
+                    currentUrl = nextUri.toString()
+                    if (code == 303) {
+                        currentMethod = "GET"
+                        currentBody = null
+                    }
+                    continue
+                }
+            }
+
+            return HttpJsonResult(
+                statusCode = hopRes.statusCode,
+                body = hopRes.body,
+                etag = hopRes.etag,
+                cookieHeader = hopRes.cookieHeader,
+            )
         }
         throw IllegalStateException("Demasiadas redirecciones HTTP.")
+    }
+
+    private data class SingleHopResult(
+        val statusCode: Int,
+        val body: String,
+        val etag: String?,
+        val cookieHeader: String,
+        val redirectLocation: String?,
+    )
+
+    private fun performSingleHttpHop(
+        urlStr: String,
+        method: String,
+        headers: Map<String, String>,
+        body: String?,
+        overrideIp: String?,
+        sniHostname: String?,
+    ): SingleHopResult {
+        val conn = if (overrideIp != null && sniHostname != null) {
+            openHttpsConnectionViaDirectIpWithSni(urlStr, overrideIp, sniHostname)
+        } else {
+            URL(urlStr).openConnection() as HttpURLConnection
+        }.apply {
+            instanceFollowRedirects = false
+            requestMethod = method
+            connectTimeout = 10_000
+            readTimeout = 12_000
+            doInput = true
+            headers.forEach { (k, v) -> setRequestProperty(k, v) }
+        }
+        try {
+            if (body != null && (method == "POST" || method == "PUT" || method == "PATCH")) {
+                conn.doOutput = true
+                val bytes = body.toByteArray(StandardCharsets.UTF_8)
+                conn.setFixedLengthStreamingMode(bytes.size)
+                conn.outputStream.use { it.write(bytes) }
+            }
+            val code = conn.responseCode
+            val loc = conn.getHeaderField("Location")?.trim()
+            val stream = if (code in 200..399) conn.inputStream else (conn.errorStream ?: conn.inputStream)
+            val text = if (stream != null) readBoundedUtf8(stream, MAX_HTTP_BODY_BYTES) else ""
+            val cookies = extractMergedCookies(conn)
+            val etag = conn.getHeaderField("ETag")
+            return SingleHopResult(
+                statusCode = code,
+                body = text,
+                etag = etag,
+                cookieHeader = cookies,
+                redirectLocation = loc,
+            )
+        } finally {
+            conn.disconnect()
+        }
     }
 
     private fun extractMergedCookies(conn: HttpURLConnection): String {
@@ -1557,6 +1648,13 @@ class RurControlCenterManager(
                 rolesArr.optString(i, "").trim().takeIf { it.isNotEmpty() }?.let { rolesList.add(it) }
             }
         }
+        val permisosList = mutableListOf<String>()
+        val permisosArr = obj.optJSONArray("permisos")
+        if (permisosArr != null) {
+            for (i in 0 until permisosArr.length()) {
+                permisosArr.optString(i, "").trim().takeIf { it.isNotEmpty() }?.let { permisosList.add(it) }
+            }
+        }
         val session = RurOperatorSession(
             id = obj.optString("id", ""),
             matricula = obj.optString("matricula", ""),
@@ -1569,6 +1667,7 @@ class RurControlCenterManager(
             loginAtIso = obj.optString("loginAtIso", ""),
             expiresAtEpochMs = expiresAt,
             hasSessionAuth = obj.optString("bearerToken").isNotBlank() || obj.optString("cookieHeader").isNotBlank(),
+            permisos = permisosList,
         )
         if (session.matricula.isBlank()) return null
         return StoredOperatorAuth(
@@ -1588,6 +1687,7 @@ class RurControlCenterManager(
             put("alias", auth.session.alias)
             put("grupo", auth.session.grupo)
             put("roles", JSONArray(auth.session.roles))
+            put("permisos", JSONArray(auth.session.permisos))
             put("totpEnabled", auth.session.totpEnabled)
             put("mustChangePassword", auth.session.mustChangePassword)
             put("loginAtIso", auth.session.loginAtIso)
@@ -1699,16 +1799,156 @@ class RurControlCenterManager(
 
     companion object {
         private const val USER_AGENT = "RUR-ControlCenter-Android/2.1"
-        private const val OPERATOR_SESSION_TTL_MS = 24L * 60L * 60L * 1000L // 24 hours (matches page/api/server.js jwt.sign expiresIn: '24h')
+        private const val OPERATOR_SESSION_TTL_MS = 24L * 60L * 60L * 1000L // 24 hours (matches PAGE_RUR shared/auth.js)
         private const val MAX_HTTP_BODY_BYTES = 262_144 // 256 KB cap
         private const val MAX_REDIRECTS = 3
         private const val MAX_EDITABLE_CMD_LEN = 512
+
+        // Official PAGE_RUR production server IP (Caddy HTTPS on rur.unipolidgo.edu.mx)
+        // Used ONLY as a last-resort fallback if the local ISP DNS and DoH are unreachable;
+        // TLS certificate & SNI hostname verification for `rur.unipolidgo.edu.mx` remain strictly enforced.
+        private val KNOWN_RUR_HOST_FALLBACK_IPS = mapOf(
+            "rur.unipolidgo.edu.mx" to "187.245.209.200",
+        )
+        private val dohResolvedIpCache = ConcurrentHashMap<String, String>()
 
         private val LIVEKIT_RECEIVER_TITLES = setOf(
             "ros:livekit_rx_pc",
             "ros:livekit_rx_agent",
             "ros:livekit_rx_motion",
         )
+
+        /**
+         * Resolves a hostname via DNS-over-HTTPS (Cloudflare `1.1.1.1` then Google `8.8.8.8` by literal IP
+         * so zero DNS lookup is required to reach the DoH server), falling back to [KNOWN_RUR_HOST_FALLBACK_IPS]
+         * when the user's ISP DNS fails to contact `srvdnsnam01.finanzasdurango.gob.mx`.
+         */
+        internal fun resolveHostViaDoHOrFallback(hostname: String): String? {
+            val cleanHost = hostname.trim().lowercase(Locale.US)
+            dohResolvedIpCache[cleanHost]?.let { return it }
+
+            val encoded = URLEncoder.encode(cleanHost, StandardCharsets.UTF_8.name())
+            val dohUrls = listOf(
+                "https://1.1.1.1/dns-query?name=$encoded&type=A",
+                "https://8.8.8.8/resolve?name=$encoded&type=A",
+            )
+            for (dohUrl in dohUrls) {
+                val ip = runCatching {
+                    val conn = (URL(dohUrl).openConnection() as HttpURLConnection).apply {
+                        requestMethod = "GET"
+                        connectTimeout = 3_500
+                        readTimeout = 3_500
+                        setRequestProperty("Accept", "application/dns-json")
+                        setRequestProperty("User-Agent", USER_AGENT)
+                    }
+                    try {
+                        if (conn.responseCode in 200..299) {
+                            val text = readBoundedUtf8(conn.inputStream, 32_768)
+                            parseFirstIpv4FromDnsJson(text)
+                        } else {
+                            null
+                        }
+                    } finally {
+                        conn.disconnect()
+                    }
+                }.getOrNull()
+                if (!ip.isNullOrBlank()) {
+                    dohResolvedIpCache[cleanHost] = ip
+                    return ip
+                }
+            }
+
+            return KNOWN_RUR_HOST_FALLBACK_IPS[cleanHost]?.also {
+                dohResolvedIpCache[cleanHost] = it
+            }
+        }
+
+        internal fun parseFirstIpv4FromDnsJson(jsonText: String): String? {
+            val obj = runCatching { JSONObject(jsonText) }.getOrNull() ?: return null
+            val answers = obj.optJSONArray("Answer") ?: return null
+            for (i in 0 until answers.length()) {
+                val ans = answers.optJSONObject(i) ?: continue
+                if (ans.optInt("type", 0) == 1) {
+                    val data = ans.optString("data", "").trim()
+                    if (data.matches(Regex("^\\d{1,3}(\\.\\d{1,3}){3}$"))) {
+                        return data
+                    }
+                }
+            }
+            return null
+        }
+
+        /**
+         * Opens an [HttpsURLConnection] to [resolvedIp] while preserving:
+         * 1) TLS SNI (`ServerNameIndication`) = [sniHostname] (required by Caddy to select the certificate)
+         * 2) Strict X.509 certificate hostname verification against [sniHostname]
+         * 3) HTTP `Host` header = [sniHostname]
+         */
+        private fun openHttpsConnectionViaDirectIpWithSni(
+            originalUrlStr: String,
+            resolvedIp: String,
+            sniHostname: String,
+        ): HttpsURLConnection {
+            val uri = URI(originalUrlStr)
+            val portPart = if (uri.port > 0) ":${uri.port}" else ""
+            val pathPart = uri.rawPath?.ifEmpty { "/" } ?: "/"
+            val queryPart = uri.rawQuery?.let { "?$it" }.orEmpty()
+            val ipUrl = URL("https://$resolvedIp$portPart$pathPart$queryPart")
+            val defaultFactory = HttpsURLConnection.getDefaultSSLSocketFactory()
+            val defaultVerifier = HttpsURLConnection.getDefaultHostnameVerifier()
+
+            val conn = ipUrl.openConnection() as HttpsURLConnection
+            conn.setRequestProperty("Host", if (uri.port > 0) "$sniHostname:${uri.port}" else sniHostname)
+            conn.sslSocketFactory = SniOverrideSslSocketFactory(defaultFactory, sniHostname)
+            conn.hostnameVerifier = javax.net.ssl.HostnameVerifier { _, session ->
+                defaultVerifier.verify(sniHostname, session)
+            }
+            return conn
+        }
+
+        private class SniOverrideSslSocketFactory(
+            private val delegate: SSLSocketFactory,
+            private val sniHostname: String,
+        ) : SSLSocketFactory() {
+            override fun getDefaultCipherSuites(): Array<String> = delegate.defaultCipherSuites
+            override fun getSupportedCipherSuites(): Array<String> = delegate.supportedCipherSuites
+
+            private fun configureSni(socket: Socket): Socket {
+                if (socket is SSLSocket) {
+                    val params: SSLParameters = socket.sslParameters
+                    params.serverNames = listOf(SNIHostName(sniHostname))
+                    socket.sslParameters = params
+                }
+                return socket
+            }
+
+            override fun createSocket(s: Socket?, host: String?, port: Int, autoClose: Boolean): Socket =
+                configureSni(delegate.createSocket(s, sniHostname, port, autoClose))
+
+            override fun createSocket(host: String?, port: Int): Socket {
+                val raw = Socket()
+                raw.connect(InetSocketAddress(host, port), 10_000)
+                return configureSni(delegate.createSocket(raw, sniHostname, port, true))
+            }
+
+            override fun createSocket(host: String?, port: Int, localHost: InetAddress?, localPort: Int): Socket {
+                val raw = Socket(localHost, localPort)
+                raw.connect(InetSocketAddress(host, port), 10_000)
+                return configureSni(delegate.createSocket(raw, sniHostname, port, true))
+            }
+
+            override fun createSocket(host: InetAddress?, port: Int): Socket {
+                val raw = Socket()
+                raw.connect(InetSocketAddress(host, port), 10_000)
+                return configureSni(delegate.createSocket(raw, sniHostname, port, true))
+            }
+
+            override fun createSocket(address: InetAddress?, port: Int, localAddress: InetAddress?, localPort: Int): Socket {
+                val raw = Socket(localAddress, localPort)
+                raw.connect(InetSocketAddress(address, port), 10_000)
+                return configureSni(delegate.createSocket(raw, sniHostname, port, true))
+            }
+        }
 
         fun isRos2SessionTitle(title: String?): Boolean {
             val t = title?.trim() ?: return false
@@ -1765,6 +2005,7 @@ class RurControlCenterManager(
             nowMs: Long = System.currentTimeMillis(),
         ): RurOperatorSession {
             val roles = parseRolesFlexible(userJson)
+            val permisos = parseStringArrayFlexible(userJson.optJSONArray("permisos"))
             val matricula = userJson.optString("matricula", "").trim().ifBlank { fallbackMatricula }
             val nombre = userJson.optString("nombre", "").trim()
                 .ifBlank { userJson.optString("name", "").trim() }
@@ -1783,7 +2024,17 @@ class RurControlCenterManager(
                 loginAtIso = formatIsoUtc(nowMs),
                 expiresAtEpochMs = nowMs + OPERATOR_SESSION_TTL_MS,
                 hasSessionAuth = hasSessionAuth,
+                permisos = permisos,
             )
+        }
+
+        private fun parseStringArrayFlexible(arr: JSONArray?): List<String> {
+            if (arr == null) return emptyList()
+            val out = mutableListOf<String>()
+            for (i in 0 until arr.length()) {
+                arr.optString(i, "").trim().takeIf { it.isNotEmpty() }?.let { out.add(it) }
+            }
+            return out
         }
 
         internal fun parseRolesFlexible(userJson: JSONObject): List<String> {
