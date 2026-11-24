@@ -6,13 +6,13 @@
 
 ### Estación de Trabajo Móvil Nativa ARM64 para Agentes de Programación IA, Terminal 120Hz y Control SSH / Tailscale
 
-[![Release](https://img.shields.io/badge/Release-v2.1.1-F2BA0B?style=for-the-badge&logo=github&logoColor=060A0F)](https://github.com/ing-melcat/Terminal-Agents-Builder/releases/latest)
+[![Release](https://img.shields.io/badge/Release-v2.1.2-F2BA0B?style=for-the-badge&logo=github&logoColor=060A0F)](https://github.com/ing-melcat/Terminal-Agents-Builder/releases/latest)
 [![Android ARM64](https://img.shields.io/badge/Android-arm64--v8a%20(API%2024%2B)-34D399?style=for-the-badge&logo=android&logoColor=060A0F)](https://github.com/ing-melcat/Terminal-Agents-Builder/releases/latest)
 [![Base](https://img.shields.io/badge/Base-Termux%20Nativo%20%2B%20ROS%202%20Jazzy-0B1016?style=for-the-badge&logo=gnubash&logoColor=F2BA0B)](#-por-qué-es-un-termux-potenciado)
 [![Stack](https://img.shields.io/badge/Kotlin%202.0%20%7C%20Jetpack%20Compose%20%7C%20C%2FJNI-111821?style=for-the-badge&logo=kotlin&logoColor=F2BA0B)](#-lenguajes-stack-tecnológico-y-arquitectura)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-F8FAFC?style=for-the-badge&logo=gnu&logoColor=060A0F)](LICENSE.md)
 
-**Construido sobre el motor POSIX nativo de Termux — ahora en `v2.1.1` con arquitectura *Dos Mundos* (`Dev & IA` ↔ `ROS 2`): estación nativa ARM64 120Hz con `agy`, `opencode`, `claude`, bóveda `0600`, SSH Pro + Tailscale, y un sector blindado en 3 etapas para Ubuntu 24.04 + ROS 2 Jazzy (`offboard_ws`) con pantalla completa `ACCESO AL SISTEMA` emparejada a `PAGE_RUR` (`POST /api/login` + DNS-over-HTTPS resiliente), aprovisionamiento obligatorio antes de desbloquear la terminal y pestañas `+` 100% directas en Ubuntu ROS 2.**
+**Construido sobre el motor POSIX nativo de Termux — ahora en `v2.1.2` con arquitectura *Dos Mundos* (`Dev & IA` ↔ `ROS 2`): estación nativa ARM64 120Hz con `agy`, `opencode`, `claude`, bóveda `0600`, SSH Pro + Tailscale, y un sector blindado en 3 etapas para Ubuntu 24.04 (`noble`) + ROS 2 Jazzy (`offboard_ws`) con pantalla completa `ACCESO AL SISTEMA` emparejada a `PAGE_RUR` (`POST /api/login` + DNS-over-HTTPS resiliente), soporte `proot-distro` v5 (`ubuntu:24.04`) y pestañas `+` 100% directas en Ubuntu ROS 2.**
 
 [Descargar APK (`arm64-v8a`)](https://github.com/ing-melcat/Terminal-Agents-Builder/releases/latest) · [Capturas de Pantalla](#-capturas-de-la-aplicación) · [Agentes y Modelos IA](#-agentes-y-modelos-de-programación-gratis--económicos--pro--locales) · [Panel SSH Pro & Tailscale](#-panel-dedicado-ssh-pro--tailscale-vpn) · [Creador](#-creador)
 

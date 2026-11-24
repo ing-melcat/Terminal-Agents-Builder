@@ -453,7 +453,13 @@ class RurControlCenterManager(
         val deviceKey = readSecretFile(deviceKeyFile)
         val operatorAuth = loadValidOperatorAuth()
         val prootBin = File(prefixDir, "bin/proot-distro")
-        val ubuntuRootfs = File(prefixDir, "var/lib/proot-distro/installed-rootfs/ubuntu")
+        val ubuntuV5Rootfs = File(prefixDir, "var/lib/proot-distro/containers/ubuntu/rootfs")
+        val ubuntuV4Rootfs = File(prefixDir, "var/lib/proot-distro/installed-rootfs/ubuntu")
+        val ubuntuRootfs = when {
+            ubuntuV5Rootfs.isDirectory && File(ubuntuV5Rootfs, "bin/bash").exists() -> ubuntuV5Rootfs
+            ubuntuV4Rootfs.isDirectory && File(ubuntuV4Rootfs, "bin/bash").exists() -> ubuntuV4Rootfs
+            else -> ubuntuV5Rootfs
+        }
         val ros2Setup = File(ubuntuRootfs, "opt/ros/jazzy/setup.bash")
         val repoDir = resolveUserPath(persisted.offboardRepoPath)
         val offboardDir = File(repoDir, "offboard_ws")

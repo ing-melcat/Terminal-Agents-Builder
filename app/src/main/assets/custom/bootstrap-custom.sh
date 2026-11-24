@@ -775,21 +775,50 @@ manage_skills() {
     esac
 }
 
+find_ubuntu_rootfs() {
+    if [ -x "$PREFIX/var/lib/proot-distro/containers/ubuntu/rootfs/bin/bash" ]; then
+        printf '%s' "$PREFIX/var/lib/proot-distro/containers/ubuntu/rootfs"
+    elif [ -x "$PREFIX/var/lib/proot-distro/installed-rootfs/ubuntu/bin/bash" ]; then
+        printf '%s' "$PREFIX/var/lib/proot-distro/installed-rootfs/ubuntu"
+    else
+        printf '%s' ""
+    fi
+}
+
 install_ros2_ubuntu() {
-    echo "[workstation] Instalando Ubuntu 24.04 (proot-distro) + ROS 2 Jazzy (offboard_ws)..."
+    echo "[workstation] Instalando Ubuntu 24.04 LTS (noble) + ROS 2 Jazzy (offboard_ws)..."
     export DEBIAN_FRONTEND=noninteractive
     pkg update -y
     pkg install -y -o Dpkg::Options::=--force-confold proot-distro curl ca-certificates git
 
-    UBUNTU_ROOT="$PREFIX/var/lib/proot-distro/installed-rootfs/ubuntu"
-    if [ ! -d "$UBUNTU_ROOT" ] || [ ! -x "$UBUNTU_ROOT/bin/bash" ]; then
-        echo "[workstation] Descargando Ubuntu 24.04 ARM64..."
-        proot-distro install ubuntu
-    else
-        echo "[workstation] Ubuntu 24.04 ya existe en proot-distro — verificando ROS 2 Jazzy..."
+    UBUNTU_ROOT="$(find_ubuntu_rootfs)"
+    if [ -n "$UBUNTU_ROOT" ]; then
+        CUR_CODENAME="$(sed -n 's/^UBUNTU_CODENAME=//p' "$UBUNTU_ROOT/etc/os-release" 2>/dev/null | tr -d '"' | head -n 1)"
+        if [ "$CUR_CODENAME" != "noble" ]; then
+            echo "[workstation] Detectado Ubuntu '${CUR_CODENAME:-desconocido}' — ROS 2 Jazzy requiere Ubuntu 24.04 LTS ('noble')."
+            echo "[workstation] Reemplazando contenedor 'ubuntu' por ubuntu:24.04..."
+            proot-distro remove ubuntu || true
+            UBUNTU_ROOT=""
+        fi
     fi
 
-    echo "[workstation] Configurando repositorio oficial ROS 2 Jazzy (signed-by GPG) + paquetes offboard_ws..."
+    if [ -z "$UBUNTU_ROOT" ]; then
+        echo "[workstation] Descargando Ubuntu 24.04 LTS (noble) ARM64..."
+        if ! proot-distro install --override-alias ubuntu ubuntu:24.04; then
+            echo "[workstation] Reintentando con alias legacy ubuntu-oldlts..."
+            proot-distro install --override-alias ubuntu ubuntu-oldlts || proot-distro install ubuntu
+        fi
+        UBUNTU_ROOT="$(find_ubuntu_rootfs)"
+    else
+        echo "[workstation] Ubuntu 24.04 (noble) ya existe en proot-distro — verificando ROS 2 Jazzy..."
+    fi
+
+    if [ -z "$UBUNTU_ROOT" ]; then
+        echo "[workstation] ERROR: No se encontró el rootfs de Ubuntu tras proot-distro install." >&2
+        return 1
+    fi
+
+    echo "[workstation] Configurando repositorio oficial ROS 2 Jazzy (Ubuntu 24.04 noble, signed-by GPG) + paquetes offboard_ws..."
     proot-distro login ubuntu \
         --bind "$HOME_DIR:$HOME_DIR" \
         --bind "$PREFIX:$PREFIX" \
@@ -811,6 +840,11 @@ install_ros2_ubuntu() {
 
             ARCH="$(dpkg --print-architecture)"
             CODENAME="$(. /etc/os-release && printf "%s" "${UBUNTU_CODENAME:-noble}")"
+            echo "[workstation] Ubuntu detectado: codename=$CODENAME arch=$ARCH"
+            if [ "$CODENAME" != "noble" ]; then
+                echo "[workstation] ERROR: Se esperaba Ubuntu 24.04 (noble) para ROS 2 Jazzy, pero se encontró: $CODENAME" >&2
+                exit 1
+            fi
             printf "deb [arch=%s signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu %s main\n" \
                 "$ARCH" "$CODENAME" > /etc/apt/sources.list.d/ros2.list
 
@@ -818,13 +852,16 @@ install_ros2_ubuntu() {
             apt-get install -y --no-install-recommends \
                 ros-jazzy-ros-base \
                 ros-jazzy-rmw-cyclonedds-cpp \
+                python3-colcon-common-extensions \
+                python3-rosdep
+
+            echo "[workstation] Instalando stack offboard (SLAM, Nav2, Depth->LaserScan, Foxglove)..."
+            apt-get install -y --no-install-recommends \
                 ros-jazzy-depthimage-to-laserscan \
                 ros-jazzy-slam-toolbox \
                 ros-jazzy-navigation2 \
                 ros-jazzy-nav2-bringup \
-                ros-jazzy-foxglove-bridge \
-                python3-colcon-common-extensions \
-                python3-rosdep
+                ros-jazzy-foxglove-bridge || true
 
             echo "[workstation] Instalando SDK Python de LiveKit (best-effort)..."
             pip3 install --break-system-packages --upgrade livekit livekit-api python-dotenv lz4 2>/dev/null || true
@@ -848,7 +885,7 @@ install_ros2_ubuntu() {
 
 run_ros2_cli() {
     SUB="${1:-shell}"
-    UBUNTU_ROOT="$PREFIX/var/lib/proot-distro/installed-rootfs/ubuntu"
+    UBUNTU_ROOT="$(find_ubuntu_rootfs)"
     case "$SUB" in
         doctor|status)
             echo "[workstation] ROS 2 Jazzy Doctor:"
@@ -857,24 +894,24 @@ run_ros2_cli() {
             else
                 echo "  [missing] proot-distro -> run 'workstation install-ros2'"
             fi
-            if [ -x "$UBUNTU_ROOT/bin/bash" ]; then
-                echo "  [ok]      Ubuntu 24.04 rootfs"
+            if [ -n "$UBUNTU_ROOT" ] && [ -x "$UBUNTU_ROOT/bin/bash" ]; then
+                echo "  [ok]      Ubuntu 24.04 rootfs ($UBUNTU_ROOT)"
             else
                 echo "  [missing] Ubuntu 24.04 -> run 'workstation install-ros2'"
             fi
-            if [ -f "$UBUNTU_ROOT/opt/ros/jazzy/setup.bash" ]; then
+            if [ -n "$UBUNTU_ROOT" ] && [ -f "$UBUNTU_ROOT/opt/ros/jazzy/setup.bash" ]; then
                 echo "  [ok]      ROS 2 Jazzy (/opt/ros/jazzy/setup.bash)"
             else
                 echo "  [missing] ROS 2 Jazzy -> run 'workstation install-ros2'"
             fi
-            if [ -x "$UBUNTU_ROOT/usr/local/bin/agy" ] && [ -x "$UBUNTU_ROOT/usr/local/bin/opencode" ]; then
+            if [ -n "$UBUNTU_ROOT" ] && [ -x "$UBUNTU_ROOT/usr/local/bin/agy" ] && [ -x "$UBUNTU_ROOT/usr/local/bin/opencode" ]; then
                 echo "  [ok]      Ubuntu AI bridges (/usr/local/bin/agy, opencode)"
             else
                 echo "  [opt]     Ubuntu AI bridges -> run 'workstation install-ros2'"
             fi
             ;;
         shell|"")
-            if [ ! -x "$PREFIX/bin/proot-distro" ] || [ ! -f "$UBUNTU_ROOT/opt/ros/jazzy/setup.bash" ]; then
+            if [ ! -x "$PREFIX/bin/proot-distro" ] || [ -z "$UBUNTU_ROOT" ] || [ ! -f "$UBUNTU_ROOT/opt/ros/jazzy/setup.bash" ]; then
                 echo "[workstation] ROS 2 Jazzy no está instalado aún. Ejecuta 'workstation install-ros2'." >&2
                 return 1
             fi
@@ -925,7 +962,8 @@ print_help() {
     else
         echo " OpenSSH    : NOT INSTALLED (run 'workstation install-ssh')"
     fi
-    if [ -f "$PREFIX/var/lib/proot-distro/installed-rootfs/ubuntu/opt/ros/jazzy/setup.bash" ]; then
+    UBUNTU_HELP_ROOT="$(find_ubuntu_rootfs)"
+    if [ -n "$UBUNTU_HELP_ROOT" ] && [ -f "$UBUNTU_HELP_ROOT/opt/ros/jazzy/setup.bash" ]; then
         echo " ROS 2 Jazzy: INSTALLED (Ubuntu 24.04 proot-distro)"
     else
         echo " ROS 2 Jazzy: OPTIONAL (run 'workstation install-ros2')"
@@ -1047,7 +1085,8 @@ case "${1:-ui}" in
         else
             echo "  [opt]     openssh (SSH & Tailscale) -> run 'workstation install-ssh'"
         fi
-        if [ -f "$PREFIX/var/lib/proot-distro/installed-rootfs/ubuntu/opt/ros/jazzy/setup.bash" ]; then
+        UBUNTU_DOC_ROOT="$(find_ubuntu_rootfs)"
+        if [ -n "$UBUNTU_DOC_ROOT" ] && [ -f "$UBUNTU_DOC_ROOT/opt/ros/jazzy/setup.bash" ]; then
             echo "  [ok]      ROS 2 Jazzy (Ubuntu 24.04 proot-distro)"
         else
             echo "  [opt]     ROS 2 Jazzy -> run 'workstation install-ros2'"
